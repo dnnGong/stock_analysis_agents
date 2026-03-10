@@ -99,7 +99,8 @@ def main() -> None:
             "  stock-agents build-db --input ./sp500_companies.csv\n"
             "  stock-agents ask \"What is the P/E ratio of Apple (AAPL)?\"\n"
             "  stock-agents ask \"Compare AAPL and MSFT 1-year return\" --arch single --provider yahoo\n"
-            "  stock-agents eval --model gpt-4o-mini --provider hybrid --output results_sdk.xlsx\n"
+            "  stock-agents ask \"Top 3 semis by 1y return\" --arch multi --multi-arch parallel\n"
+            "  stock-agents eval --model gpt-4o-mini --provider hybrid --multi-arch pipeline --output results_sdk.xlsx\n"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
@@ -116,6 +117,12 @@ def main() -> None:
         choices=["single", "multi"],
         default="multi",
         help="Agent architecture to use (default: multi)",
+    )
+    q.add_argument(
+        "--multi-arch",
+        choices=["orchestrator", "pipeline", "parallel"],
+        default="orchestrator",
+        help="Multi-agent pattern when --arch=multi (default: orchestrator)",
     )
     q.add_argument(
         "--model",
@@ -162,6 +169,12 @@ def main() -> None:
         choices=["alphavantage", "yahoo", "hybrid"],
         default=None,
         help="Data-source provider override for this run",
+    )
+    ev.add_argument(
+        "--multi-arch",
+        choices=["orchestrator", "pipeline", "parallel"],
+        default="orchestrator",
+        help="Multi-agent pattern for evaluation (default: orchestrator)",
     )
 
     db = sub.add_parser(
@@ -222,7 +235,14 @@ def main() -> None:
             else:
                 _print_single_summary(args.question, model, provider_name, out)
         else:
-            out = run_multi_agent(client, model, tool_functions, args.question, verbose=args.trace)
+            out = run_multi_agent(
+                client,
+                model,
+                tool_functions,
+                args.question,
+                verbose=args.trace,
+                architecture=args.multi_arch,
+            )
             if args.json:
                 print(json.dumps(_serialize_obj(out), ensure_ascii=False, indent=2, default=str))
             else:
@@ -236,6 +256,7 @@ def main() -> None:
             questions=BENCHMARK_QUESTIONS,
             tool_functions=tool_functions,
             output_xlsx=args.output,
+            multi_architecture=args.multi_arch,
         )
         _print_eval_summary(path)
         return

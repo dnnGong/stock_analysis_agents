@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from openai import OpenAI
 
@@ -25,7 +26,8 @@ SPECIALIST_CONFIG = {
         "tools": FUNDAMENTAL_TOOLS,
         "prompt": (
             "Handle fundamentals and sector/industry filtering. "
-            "Use overview/sql/ticker tools and keep output concise."
+            "Use overview/sql/ticker tools and keep output concise. "
+            "If get_company_overview returns pe_ratio, use that directly."
         ),
     },
     "sentiment": {
@@ -101,7 +103,69 @@ def _orchestrate(client: OpenAI, model: str, question: str) -> dict:
 
 
 
-def run_multi_agent(
+def _run_one_specialist(
+    client: OpenAI,
+    model: str,
+    tool_functions: dict,
+    specialist_key: str,
+    task: str,
+    verbose: bool,
+) -> AgentResult:
+    cfg = SPECIALIST_CONFIG[specialist_key]
+    result = run_specialist_agent(
+        client=client,
+        model=model,
+        tool_functions=tool_functions,
+        agent_name=cfg["name"],
+        system_prompt=cfg["prompt"],
+        task=task,
+        tool_schemas=cfg["tools"],
+        max_iters=8,
+        max_tool_calls_per_turn=25,
+        verbose=verbose,
+    )
+    result.confidence = 0.75
+    return result
+
+
+
+def _aggregate_answers(
+    client: OpenAI,
+    model: str,
+    question: str,
+    specialist_results: list[AgentResult],
+    architecture_name: str,
+) -> AgentResult:
+    packed = "\n\n".join(
+        f"[{r.agent_name}]\nTools: {r.tools_called}\nAnswer: {r.answer}" for r in specialist_results
+    )
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYNTHESIS_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Architecture: {architecture_name}\n"
+                    f"Question:\n{question}\n\n"
+                    f"Specialist outputs:\n{packed}"
+                ),
+            },
+        ],
+        temperature=0,
+    )
+    return AgentResult(
+        agent_name="Aggregator",
+        answer=resp.choices[0].message.content or "Unable to synthesize answer.",
+        tools_called=[],
+        confidence=0.7,
+        issues_found=[],
+        reasoning="Merged specialist outputs into a single answer.",
+    )
+
+
+
+def run_multi_agent_orchestrator(
     client: OpenAI,
     model: str,
     tool_functions: dict,
@@ -113,20 +177,14 @@ def run_multi_agent(
 
     specialists: list[AgentResult] = []
     for key in plan["agents"]:
-        cfg = SPECIALIST_CONFIG[key]
-        result = run_specialist_agent(
+        result = _run_one_specialist(
             client=client,
             model=model,
             tool_functions=tool_functions,
-            agent_name=cfg["name"],
-            system_prompt=cfg["prompt"],
+            specialist_key=key,
             task=plan["subtasks"].get(key, question),
-            tool_schemas=cfg["tools"],
-            max_iters=8,
-            max_tool_calls_per_turn=25,
             verbose=verbose,
         )
-        result.confidence = 0.75
         specialists.append(result)
 
     packed = "\n\n".join(
@@ -191,3 +249,138 @@ def run_multi_agent(
         "elapsed_sec": time.time() - start,
         "architecture": "orchestrator-specialists-critic",
     }
+
+
+
+def run_multi_agent_pipeline(
+    client: OpenAI,
+    model: str,
+    tool_functions: dict,
+    question: str,
+    verbose: bool = False,
+) -> dict:
+    start = time.time()
+
+    stage1_task = (
+        "Step 1 (market discovery): extract relevant tickers/price constraints for this question.\n"
+        f"Question: {question}"
+    )
+    s1 = _run_one_specialist(client, model, tool_functions, "market", stage1_task, verbose)
+
+    stage2_task = (
+        "Step 2 (fundamentals refinement): use Stage 1 output as context and add fundamentals.\n"
+        f"Question: {question}\n\nStage 1 output:\n{s1.answer}"
+    )
+    s2 = _run_one_specialist(client, model, tool_functions, "fundamental", stage2_task, verbose)
+
+    stage3_task = (
+        "Step 3 (sentiment enrichment): use Stage 1 + Stage 2 outputs and add sentiment context.\n"
+        f"Question: {question}\n\nStage 1 output:\n{s1.answer}\n\nStage 2 output:\n{s2.answer}"
+    )
+    s3 = _run_one_specialist(client, model, tool_functions, "sentiment", stage3_task, verbose)
+
+    specialists = [s1, s2, s3]
+    aggregator = _aggregate_answers(
+        client=client,
+        model=model,
+        question=question,
+        specialist_results=specialists,
+        architecture_name="sequential-pipeline",
+    )
+
+    return {
+        "final_answer": aggregator.answer,
+        "agent_results": specialists + [aggregator],
+        "elapsed_sec": time.time() - start,
+        "architecture": "sequential-pipeline",
+    }
+
+
+
+def run_multi_agent_parallel(
+    client: OpenAI,
+    model: str,
+    tool_functions: dict,
+    question: str,
+    verbose: bool = False,
+) -> dict:
+    start = time.time()
+
+    tasks = {
+        "market": f"Price/market view for question: {question}",
+        "fundamental": f"Fundamental view for question: {question}",
+        "sentiment": f"Sentiment/news view for question: {question}",
+    }
+
+    specialists: list[AgentResult] = []
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futures = {
+            ex.submit(
+                _run_one_specialist,
+                client,
+                model,
+                tool_functions,
+                key,
+                tasks[key],
+                verbose,
+            ): key
+            for key in ("market", "fundamental", "sentiment")
+        }
+        for fut in as_completed(futures):
+            key = futures[fut]
+            try:
+                specialists.append(fut.result())
+            except Exception as exc:
+                specialists.append(
+                    AgentResult(
+                        agent_name=SPECIALIST_CONFIG[key]["name"],
+                        answer=f"Specialist failed: {exc}",
+                        tools_called=[],
+                        confidence=0.0,
+                        issues_found=[str(exc)],
+                    )
+                )
+
+    # Keep deterministic ordering in output.
+    name_order = {
+        SPECIALIST_CONFIG["market"]["name"]: 0,
+        SPECIALIST_CONFIG["fundamental"]["name"]: 1,
+        SPECIALIST_CONFIG["sentiment"]["name"]: 2,
+    }
+    specialists.sort(key=lambda r: name_order.get(r.agent_name, 99))
+
+    aggregator = _aggregate_answers(
+        client=client,
+        model=model,
+        question=question,
+        specialist_results=specialists,
+        architecture_name="parallel-specialists-aggregator",
+    )
+
+    return {
+        "final_answer": aggregator.answer,
+        "agent_results": specialists + [aggregator],
+        "elapsed_sec": time.time() - start,
+        "architecture": "parallel-specialists-aggregator",
+    }
+
+
+
+def run_multi_agent(
+    client: OpenAI,
+    model: str,
+    tool_functions: dict,
+    question: str,
+    verbose: bool = False,
+    architecture: str = "orchestrator",
+) -> dict:
+    arch = (architecture or "orchestrator").strip().lower()
+    if arch in {"orchestrator", "orchestrator-specialists-critic", "default"}:
+        return run_multi_agent_orchestrator(client, model, tool_functions, question, verbose=verbose)
+    if arch in {"pipeline", "sequential", "sequential-pipeline"}:
+        return run_multi_agent_pipeline(client, model, tool_functions, question, verbose=verbose)
+    if arch in {"parallel", "parallel-specialists-aggregator"}:
+        return run_multi_agent_parallel(client, model, tool_functions, question, verbose=verbose)
+    raise ValueError(
+        "Unknown multi-agent architecture. Use one of: orchestrator, pipeline, parallel."
+    )

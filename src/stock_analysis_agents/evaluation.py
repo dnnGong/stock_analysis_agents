@@ -35,6 +35,7 @@ def run_full_evaluation(
     questions: list[dict],
     tool_functions: dict,
     output_xlsx: str = "results.xlsx",
+    multi_architecture: str = "orchestrator",
 ) -> str:
     records: list[EvalRecord] = []
 
@@ -58,7 +59,14 @@ def run_full_evaluation(
         rec.sa_score = run_evaluator(client, model, q["question"], q["expected"], sa.answer).get("score", -1)
 
         t0 = time.time()
-        ma = run_multi_agent(client, model, tool_functions, q["question"], verbose=False)
+        ma = run_multi_agent(
+            client,
+            model,
+            tool_functions,
+            q["question"],
+            verbose=False,
+            architecture=multi_architecture,
+        )
         rec.ma_time = round(time.time() - t0, 2)
         rec.ma_score = run_evaluator(client, model, q["question"], q["expected"], ma.get("final_answer", "")).get("score", -1)
 

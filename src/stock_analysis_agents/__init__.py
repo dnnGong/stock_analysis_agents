@@ -8,7 +8,12 @@ try:
     from .evaluation import run_full_evaluation
     from .evaluator import run_evaluator
     from .llm import make_client
-    from .multi_agent import run_multi_agent
+    from .multi_agent import (
+        run_multi_agent,
+        run_multi_agent_orchestrator,
+        run_multi_agent_parallel,
+        run_multi_agent_pipeline,
+    )
     from .single_agent import run_single_agent
     from .providers import (
         AlphaVantageProvider,
@@ -24,6 +29,9 @@ except Exception:
     make_client = None
     run_multi_agent = None
     run_single_agent = None
+    run_multi_agent_orchestrator = None
+    run_multi_agent_pipeline = None
+    run_multi_agent_parallel = None
     AlphaVantageProvider = None
     YahooFinanceProvider = None
     HybridProvider = None
@@ -41,6 +49,9 @@ __all__ = [
     "run_baseline",
     "run_single_agent",
     "run_multi_agent",
+    "run_multi_agent_orchestrator",
+    "run_multi_agent_pipeline",
+    "run_multi_agent_parallel",
     "run_evaluator",
     "run_full_evaluation",
     "make_client",

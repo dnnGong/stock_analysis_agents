@@ -3,7 +3,10 @@
 A practical Python SDK for stock analysis with:
 - baseline (no tools)
 - single-agent (all tools)
-- multi-agent (`orchestrator + specialists + critic`)
+- multi-agent with 3 patterns:
+  - `orchestrator + specialists + critic`
+  - `sequential pipeline`
+  - `parallel specialists + aggregator`
 - evaluator and benchmark runner
 
 This project is extracted from `mp3_assignment_chenlei1_dnngong2.ipynb` and packaged for reuse.
@@ -15,7 +18,8 @@ This project is extracted from `mp3_assignment_chenlei1_dnngong2.ipynb` and pack
 - CLI (`stock-agents`) for quick usage.
 - Environment-variable-only secrets loading (no hardcoded keys).
 
-## Multi-Agent Architecture
+## Multi-Agent Architectures
+### 1) Orchestrator + Specialists + Critic
 ```text
 User Question
    |
@@ -40,6 +44,34 @@ User Question
    |- outputs: confidence, issues, corrected final answer
    v
 Final Answer (+ agent_results, elapsed_sec, architecture)
+```
+
+### 2) Sequential Pipeline
+```text
+User Question
+   |
+   v
+[Agent 1: Market]
+   |
+   v
+[Agent 2: Fundamental]  (sees Agent 1 output)
+   |
+   v
+[Agent 3: Sentiment]    (sees Agent 1 + 2 outputs)
+   |
+   v
+[Aggregator]
+   |
+   v
+Final Answer
+```
+
+### 3) Parallel Specialists + Aggregator
+```text
+User Question
+   ├── [Market Specialist] ─┐
+   ├── [Fundamental Spec.] ─┼──> [Aggregator] -> Final Answer
+   └── [Sentiment Spec.]  ──┘
 ```
 
 ## Requirements
@@ -110,6 +142,13 @@ stock-agents ask "What is the P/E ratio of Apple (AAPL)?"
 Default output is a human-readable summary. Use `--json` for raw structured output, and
 use `--trace` to print detailed tool-call logs.
 
+### Choose multi-agent pattern
+```bash
+stock-agents ask "Top 3 semiconductor stocks by 1-year return" --arch multi --multi-arch orchestrator
+stock-agents ask "Top 3 semiconductor stocks by 1-year return" --arch multi --multi-arch pipeline
+stock-agents ask "Top 3 semiconductor stocks by 1-year return" --arch multi --multi-arch parallel
+```
+
 ### Ask with single-agent
 ```bash
 stock-agents ask "Compare the 1-year returns of AAPL, MSFT, GOOGL" --arch single
@@ -124,9 +163,9 @@ stock-agents ask "What is the P/E ratio of Apple (AAPL)?" --provider yahoo --jso
 
 ### Run full benchmark evaluation
 ```bash
-stock-agents eval --model gpt-4o-mini --output results_sdk_mini.xlsx
-stock-agents eval --model gpt-4o --output results_sdk_4o.xlsx
-stock-agents eval --model gpt-4o-mini --provider hybrid --output results_sdk_hybrid.xlsx
+stock-agents eval --model gpt-4o-mini --multi-arch orchestrator --output results_sdk_mini_orch.xlsx
+stock-agents eval --model gpt-4o-mini --multi-arch pipeline --output results_sdk_mini_pipeline.xlsx
+stock-agents eval --model gpt-4o-mini --multi-arch parallel --output results_sdk_mini_parallel.xlsx
 ```
 
 ## Python SDK Usage
@@ -152,6 +191,7 @@ out = run_multi_agent(
     tool_functions=func_map,
     question="For the top 3 semiconductor stocks by 1-year return, what are their P/E ratios?",
     verbose=False,
+    architecture="parallel",  # orchestrator | pipeline | parallel
 )
 print(out["final_answer"])
 ```
@@ -174,7 +214,7 @@ stock_analysis_agents/
 │       ├── agent_runner.py     # reusable tool-call loop
 │       ├── baseline.py         # no-tool baseline agent
 │       ├── single_agent.py     # single-agent architecture
-│       ├── multi_agent.py      # orchestrator + specialists + critic
+│       ├── multi_agent.py      # orchestrator / pipeline / parallel multi-agent patterns
 │       ├── evaluator.py        # LLM-as-judge scoring
 │       ├── benchmark.py        # fixed benchmark question set
 │       ├── evaluation.py       # batch runner + xlsx output

@@ -107,6 +107,8 @@ stock-agents build-db -h
 ```bash
 stock-agents ask "What is the P/E ratio of Apple (AAPL)?"
 ```
+Default output is a human-readable summary. Use `--json` for raw structured output, and
+use `--trace` to print detailed tool-call logs.
 
 ### Ask with single-agent
 ```bash
@@ -117,6 +119,7 @@ stock-agents ask "Compare the 1-year returns of AAPL, MSFT, GOOGL" --arch single
 ```bash
 stock-agents ask "Are US markets open right now?" --provider alphavantage
 stock-agents ask "Compare AAPL and MSFT 1-year return" --provider yahoo
+stock-agents ask "What is the P/E ratio of Apple (AAPL)?" --provider yahoo --json
 ```
 
 ### Run full benchmark evaluation

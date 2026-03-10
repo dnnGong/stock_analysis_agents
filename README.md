@@ -15,6 +15,33 @@ This project is extracted from `mp3_assignment_chenlei1_dnngong2.ipynb` and pack
 - CLI (`stock-agents`) for quick usage.
 - Environment-variable-only secrets loading (no hardcoded keys).
 
+## Multi-Agent Architecture
+```text
+User Question
+   |
+   v
+[Orchestrator]
+   |- decides active specialists
+   |- generates sub-tasks
+   v
+┌───────────────────────────────────────────────────────────┐
+│ Specialists (tool-scoped)                                │
+│   • Market Specialist      -> tickers/price/status/movers│
+│   • Fundamental Specialist -> overview/sql/tickers       │
+│   • Sentiment Specialist   -> news/sql                   │
+└───────────────────────────────────────────────────────────┘
+   |
+   v
+[Synthesis]
+   |- merges specialist outputs into one draft answer
+   v
+[Critic]
+   |- checks missing fields / contradictions / support
+   |- outputs: confidence, issues, corrected final answer
+   v
+Final Answer (+ agent_results, elapsed_sec, architecture)
+```
+
 ## Requirements
 - Python 3.10+
 - A local `stocks.db` file with table `stocks` (columns expected in the notebook assignment).
@@ -129,25 +156,29 @@ print(out["final_answer"])
 ## Project Structure
 ```text
 stock_analysis_agents/
-  pyproject.toml
-  README.md
-  src/stock_analysis_agents/
-    __init__.py
-    config.py
-    llm.py
-    models.py
-    providers.py
-    tools.py
-    schemas.py
-    agent_runner.py
-    baseline.py
-    single_agent.py
-    multi_agent.py
-    evaluator.py
-    benchmark.py
-    evaluation.py
-    cli.py
-  tests/
+├── pyproject.toml
+├── README.md
+├── src/
+│   └── stock_analysis_agents/
+│       ├── __init__.py
+│       ├── cli.py              # CLI entrypoint: stock-agents
+│       ├── config.py           # env-based settings
+│       ├── llm.py              # OpenAI client factory
+│       ├── models.py           # shared dataclasses
+│       ├── providers.py        # data-source abstraction layer
+│       ├── tools.py            # tool wrappers + local DB queries
+│       ├── schemas.py          # tool schemas for function calling
+│       ├── agent_runner.py     # reusable tool-call loop
+│       ├── baseline.py         # no-tool baseline agent
+│       ├── single_agent.py     # single-agent architecture
+│       ├── multi_agent.py      # orchestrator + specialists + critic
+│       ├── evaluator.py        # LLM-as-judge scoring
+│       ├── benchmark.py        # fixed benchmark question set
+│       ├── evaluation.py       # batch runner + xlsx output
+│       └── db_builder.py       # build stocks.db from csv/xlsx
+└── tests/
+    ├── test_imports.py
+    └── test_db_builder.py
 ```
 
 ## Notes

@@ -10,6 +10,7 @@ This project is extracted from `mp3_assignment_chenlei1_dnngong2.ipynb` and pack
 
 ## Features
 - Tooling for price performance, market status, top movers, company overview, news sentiment, and local SQL lookup.
+- Switchable data-source providers: `alphavantage`, `yahoo`, `hybrid`.
 - SDK APIs for `run_single_agent`, `run_multi_agent`, `run_evaluator`, and `run_full_evaluation`.
 - CLI (`stock-agents`) for quick usage.
 - Environment-variable-only secrets loading (no hardcoded keys).
@@ -37,7 +38,13 @@ export STOCK_AGENTS_MODEL="gpt-4o-mini"
 export STOCK_AGENTS_MODEL_SMALL="gpt-4o-mini"
 export STOCK_AGENTS_MODEL_LARGE="gpt-4o"
 export STOCK_AGENTS_DB_PATH="/absolute/path/to/stocks.db"
+export STOCK_AGENTS_DATA_PROVIDER="hybrid"  # alphavantage | yahoo | hybrid
 ```
+
+Provider notes:
+- `alphavantage`: full endpoint coverage in this SDK (requires `ALPHAVANTAGE_API_KEY`).
+- `yahoo`: good for price + overview; market-status/movers/news sentiment return `error` (unsupported).
+- `hybrid`: Alpha Vantage for status/movers/news, Yahoo for price, overview fallback.
 
 ## Build `stocks.db` from your data file
 If you have a companies dataset in `.csv` or `.xlsx`, build the local sqlite DB:
@@ -61,6 +68,14 @@ Expected input columns (case-insensitive, common variants supported):
 - optional `marketcap` (used to derive `Large` / `Mid` / `Small`)
 
 ## CLI Usage
+### Built-in help
+```bash
+stock-agents -h
+stock-agents ask -h
+stock-agents eval -h
+stock-agents build-db -h
+```
+
 ### Ask one question (multi-agent default)
 ```bash
 stock-agents ask "What is the P/E ratio of Apple (AAPL)?"
@@ -71,10 +86,17 @@ stock-agents ask "What is the P/E ratio of Apple (AAPL)?"
 stock-agents ask "Compare the 1-year returns of AAPL, MSFT, GOOGL" --arch single
 ```
 
+### Ask with explicit provider
+```bash
+stock-agents ask "Are US markets open right now?" --provider alphavantage
+stock-agents ask "Compare AAPL and MSFT 1-year return" --provider yahoo
+```
+
 ### Run full benchmark evaluation
 ```bash
 stock-agents eval --model gpt-4o-mini --output results_sdk_mini.xlsx
 stock-agents eval --model gpt-4o --output results_sdk_4o.xlsx
+stock-agents eval --model gpt-4o-mini --provider hybrid --output results_sdk_hybrid.xlsx
 ```
 
 ## Python SDK Usage
@@ -82,6 +104,7 @@ stock-agents eval --model gpt-4o --output results_sdk_4o.xlsx
 from stock_analysis_agents import (
     load_settings,
     make_client,
+    make_data_provider,
     FinanceTools,
     build_tool_function_map,
     run_multi_agent,
@@ -89,7 +112,8 @@ from stock_analysis_agents import (
 
 settings = load_settings()
 client = make_client(settings)
-tools = FinanceTools(settings.alphavantage_api_key, settings.db_path)
+provider = make_data_provider(settings.data_provider, settings.alphavantage_api_key)
+tools = FinanceTools(provider=provider, db_path=settings.db_path)
 func_map = build_tool_function_map(tools)
 
 out = run_multi_agent(
@@ -112,6 +136,7 @@ stock_analysis_agents/
     config.py
     llm.py
     models.py
+    providers.py
     tools.py
     schemas.py
     agent_runner.py

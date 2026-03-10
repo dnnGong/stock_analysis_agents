@@ -10,6 +10,12 @@ try:
     from .llm import make_client
     from .multi_agent import run_multi_agent
     from .single_agent import run_single_agent
+    from .providers import (
+        AlphaVantageProvider,
+        HybridProvider,
+        YahooFinanceProvider,
+        make_data_provider,
+    )
     from .tools import FinanceTools, build_tool_function_map
 except Exception:
     run_baseline = None
@@ -18,6 +24,10 @@ except Exception:
     make_client = None
     run_multi_agent = None
     run_single_agent = None
+    AlphaVantageProvider = None
+    YahooFinanceProvider = None
+    HybridProvider = None
+    make_data_provider = None
     FinanceTools = None
     build_tool_function_map = None
 
@@ -34,6 +44,10 @@ __all__ = [
     "run_evaluator",
     "run_full_evaluation",
     "make_client",
+    "make_data_provider",
+    "AlphaVantageProvider",
+    "YahooFinanceProvider",
+    "HybridProvider",
     "FinanceTools",
     "build_tool_function_map",
 ]

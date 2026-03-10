@@ -5,67 +5,26 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import requests
-import yfinance as yf
+
+from .providers import MarketDataProvider
 
 
 class FinanceTools:
-    def __init__(self, alphavantage_api_key: str, db_path: Path):
-        self.alphavantage_api_key = alphavantage_api_key
+    def __init__(self, provider: MarketDataProvider, db_path: Path):
+        self.provider = provider
         self.db_path = db_path
 
     def get_price_performance(self, tickers: list[str], period: str = "1y") -> dict[str, Any]:
-        results: dict[str, Any] = {}
-        for ticker in tickers:
-            try:
-                data = yf.download(ticker, period=period, progress=False, auto_adjust=True)
-                if data.empty:
-                    results[ticker] = {"error": "No data — possibly delisted"}
-                    continue
-                start = float(data["Close"].iloc[0].item())
-                end = float(data["Close"].iloc[-1].item())
-                results[ticker] = {
-                    "start_price": round(start, 2),
-                    "end_price": round(end, 2),
-                    "pct_change": round((end - start) / start * 100, 2),
-                    "period": period,
-                }
-            except Exception as exc:
-                results[ticker] = {"error": str(exc)}
-        return results
+        return self.provider.get_price_performance(tickers=tickers, period=period)
 
     def get_market_status(self) -> dict[str, Any]:
-        return requests.get(
-            "https://www.alphavantage.co/query"
-            f"?function=MARKET_STATUS&apikey={self.alphavantage_api_key}",
-            timeout=15,
-        ).json()
+        return self.provider.get_market_status()
 
     def get_top_gainers_losers(self) -> dict[str, Any]:
-        return requests.get(
-            "https://www.alphavantage.co/query"
-            f"?function=TOP_GAINERS_LOSERS&apikey={self.alphavantage_api_key}",
-            timeout=15,
-        ).json()
+        return self.provider.get_top_gainers_losers()
 
     def get_news_sentiment(self, ticker: str, limit: int = 5) -> dict[str, Any]:
-        data = requests.get(
-            "https://www.alphavantage.co/query"
-            f"?function=NEWS_SENTIMENT&tickers={ticker}&limit={limit}&apikey={self.alphavantage_api_key}",
-            timeout=15,
-        ).json()
-        return {
-            "ticker": ticker,
-            "articles": [
-                {
-                    "title": a.get("title"),
-                    "source": a.get("source"),
-                    "sentiment": a.get("overall_sentiment_label"),
-                    "score": a.get("overall_sentiment_score"),
-                }
-                for a in data.get("feed", [])[:limit]
-            ],
-        }
+        return self.provider.get_news_sentiment(ticker=ticker, limit=limit)
 
     def query_local_db(self, sql: str) -> dict[str, Any]:
         # Keep this SDK safe for public use: only allow SELECT statements.
@@ -81,25 +40,7 @@ class FinanceTools:
             return {"error": str(exc)}
 
     def get_company_overview(self, ticker: str) -> dict[str, Any]:
-        data = requests.get(
-            "https://www.alphavantage.co/query"
-            f"?function=OVERVIEW&symbol={ticker}&apikey={self.alphavantage_api_key}",
-            timeout=15,
-        ).json()
-
-        if "Name" not in data:
-            return {"error": f"No overview data for {ticker}"}
-
-        return {
-            "ticker": ticker,
-            "name": data.get("Name", ""),
-            "sector": data.get("Sector", ""),
-            "pe_ratio": data.get("PERatio", ""),
-            "eps": data.get("EPS", ""),
-            "market_cap": data.get("MarketCapitalization", ""),
-            "52w_high": data.get("52WeekHigh", ""),
-            "52w_low": data.get("52WeekLow", ""),
-        }
+        return self.provider.get_company_overview(ticker=ticker)
 
     def get_tickers_by_sector(self, sector: str) -> dict[str, Any]:
         try:

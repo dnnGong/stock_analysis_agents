@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-analysis-agents"
+version = "0.1.0"
+description = "A practical SDK for stock analysis with tool-using single/multi agents"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  {name = "Your Name"}
+]
+dependencies = [
+  "openai>=1.40.0",
+  "pandas>=2.0.0",
+  "requests>=2.31.0",
+  "yfinance>=0.2.40",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[project.scripts]
+stock-agents = "stock_analysis_agents.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

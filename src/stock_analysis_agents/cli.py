@@ -43,6 +43,7 @@ def _print_single_summary(question: str, model: str, provider: str, out: Any) ->
 
 def _print_multi_summary(question: str, model: str, provider: str, out: dict[str, Any]) -> None:
     results = out.get("agent_results", [])
+    diag = out.get("diagnostics", {}) if isinstance(out.get("diagnostics", {}), dict) else {}
     print("\n=== Stock Agents Result ===")
     print(_line("Architecture", str(out.get("architecture", "multi-agent"))))
     print(_line("Model", model))
@@ -53,6 +54,15 @@ def _print_multi_summary(question: str, model: str, provider: str, out: dict[str
 
     print("\nFinal Answer:")
     print(_clip(str(out.get("final_answer", "")), 1000) or "(empty)")
+
+    if diag:
+        print("\nCritic Diagnostics:")
+        print(_line("Strategy", str(diag.get("critic_strategy_effective", "n/a"))))
+        print(_line("Rewrite", str(diag.get("rewrite_applied", False))))
+        print(_line("Gate", str(diag.get("gate_triggered", "n/a"))))
+        print(_line("Choice", str(diag.get("draft_choice", "n/a"))))
+        print(_line("Critic Conf", str(diag.get("critic_confidence", "n/a"))))
+        print(_line("Critic Issues", str(diag.get("critic_issue_count", "n/a"))))
 
     if results:
         print("\nAgent Breakdown:")
@@ -127,11 +137,12 @@ def main() -> None:
     )
     q.add_argument(
         "--critic-strategy",
-        choices=["strict-rewrite", "soft-gated", "dual-draft"],
+        choices=["strict-rewrite", "no-rewrite", "soft-gated", "dual-draft", "minimal-rewrite", "auto"],
         default="strict-rewrite",
         help=(
             "Critic strategy for orchestrator mode only. "
-            "strict-rewrite | soft-gated | dual-draft (default: strict-rewrite)"
+            "strict-rewrite | no-rewrite | soft-gated | dual-draft | minimal-rewrite | auto "
+            "(default: strict-rewrite)"
         ),
     )
     q.add_argument(
@@ -188,11 +199,44 @@ def main() -> None:
     )
     ev.add_argument(
         "--critic-strategy",
-        choices=["strict-rewrite", "soft-gated", "dual-draft"],
+        choices=["strict-rewrite", "no-rewrite", "soft-gated", "dual-draft", "minimal-rewrite", "auto"],
         default="strict-rewrite",
         help=(
             "Critic strategy used when --multi-arch=orchestrator. "
             "Ignored for pipeline/parallel."
+        ),
+    )
+
+    evs = sub.add_parser(
+        "eval-strategies",
+        help="Run orchestrator MA across multiple critic strategies",
+        description=(
+            "Runs the full benchmark for each critic strategy and writes one xlsx per strategy, "
+            "plus a consolidated summary csv."
+        ),
+    )
+    evs.add_argument(
+        "--output-prefix",
+        default="results_strategy_compare",
+        help="Output file prefix (default: results_strategy_compare)",
+    )
+    evs.add_argument(
+        "--model",
+        default=None,
+        help="Override model name for this run",
+    )
+    evs.add_argument(
+        "--provider",
+        choices=["alphavantage", "yahoo", "hybrid"],
+        default=None,
+        help="Data-source provider override for this run",
+    )
+    evs.add_argument(
+        "--strategies",
+        default="strict-rewrite,no-rewrite,soft-gated,dual-draft,minimal-rewrite,auto",
+        help=(
+            "Comma-separated critic strategies for orchestrator MA. "
+            "Example: strict-rewrite,no-rewrite,soft-gated"
         ),
     )
 
@@ -280,6 +324,57 @@ def main() -> None:
             critic_strategy=args.critic_strategy,
         )
         _print_eval_summary(path)
+        return
+
+    if args.cmd == "eval-strategies":
+        import pandas as pd
+
+        valid = {"strict-rewrite", "no-rewrite", "soft-gated", "dual-draft", "minimal-rewrite", "auto"}
+        strategies = [x.strip() for x in str(args.strategies).split(",") if x.strip()]
+        bad = [s for s in strategies if s not in valid]
+        if bad:
+            raise ValueError(f"Unknown strategies: {bad}. Valid: {sorted(valid)}")
+        if not strategies:
+            raise ValueError("No strategies specified.")
+
+        rows: list[dict[str, Any]] = []
+        for strat in strategies:
+            out_path = f"{args.output_prefix}_{strat.replace('-', '_')}.xlsx"
+            path = run_full_evaluation(
+                client=client,
+                model=model,
+                questions=BENCHMARK_QUESTIONS,
+                tool_functions=tool_functions,
+                output_xlsx=out_path,
+                multi_architecture="orchestrator",
+                critic_strategy=strat,
+            )
+            df = pd.read_excel(path, sheet_name="Results")
+            ma_avg = float(df["ma_score"].mean())
+            sa_avg = float(df["sa_score"].mean())
+            rows.append(
+                {
+                    "strategy": strat,
+                    "output_xlsx": path,
+                    "baseline_avg": float(df["bl_score"].mean()),
+                    "single_avg": sa_avg,
+                    "multi_avg": ma_avg,
+                    "multi_minus_single": ma_avg - sa_avg,
+                    "ma_confidence_avg": float(df["ma_confidence"].mean()) if "ma_confidence" in df.columns else float("nan"),
+                    "ma_critic_issue_avg": float(df["ma_critic_issue_count"].mean()) if "ma_critic_issue_count" in df.columns else float("nan"),
+                    "ma_calibration_abs_error_avg": float(df["ma_calibration_abs_error"].mean()) if "ma_calibration_abs_error" in df.columns else float("nan"),
+                }
+            )
+
+        comp = pd.DataFrame(rows).sort_values("multi_avg", ascending=False)
+        summary_csv = f"{args.output_prefix}_summary.csv"
+        comp.to_csv(summary_csv, index=False)
+
+        print("\n=== Strategy Comparison ===")
+        print(_line("Model", model))
+        print(_line("Provider", provider_name))
+        print(_line("Summary", summary_csv))
+        print(comp.to_string(index=False))
         return
 
 

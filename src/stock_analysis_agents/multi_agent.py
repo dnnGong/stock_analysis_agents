@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
 
 from openai import OpenAI
 
@@ -81,8 +82,26 @@ Rules:
 - output JSON only
 """
 
+MINIMAL_REWRITE_PROMPT = """
+You are a careful post-editor for finance QA answers.
+Goal: minimally revise the draft answer.
+Rules:
+- Keep all supported numbers and claims unchanged where possible.
+- Only patch missing required fields, obvious contradictions, or unsupported claims.
+- Do NOT add generic disclaimers unless absolutely necessary.
+- If no safe improvement is possible, return the original draft.
+Return plain text only.
+"""
+
 DEFAULT_CRITIC_STRATEGY = "strict-rewrite"
-VALID_CRITIC_STRATEGIES = {"strict-rewrite", "soft-gated", "dual-draft"}
+VALID_CRITIC_STRATEGIES = {
+    "strict-rewrite",
+    "no-rewrite",
+    "soft-gated",
+    "dual-draft",
+    "minimal-rewrite",
+    "auto",
+}
 
 
 def _parse_json(text: str, fallback: dict) -> dict:
@@ -97,17 +116,55 @@ def _normalize_critic_strategy(strategy: str | None) -> str:
     aliases = {
         "strict": "strict-rewrite",
         "default": "strict-rewrite",
+        "none": "no-rewrite",
+        "no": "no-rewrite",
         "soft": "soft-gated",
         "soft-gate": "soft-gated",
         "dual": "dual-draft",
         "dual-draft-choice": "dual-draft",
+        "minimal": "minimal-rewrite",
     }
     norm = aliases.get(raw, raw)
     if norm not in VALID_CRITIC_STRATEGIES:
         raise ValueError(
-            "Unknown critic strategy. Use one of: strict-rewrite, soft-gated, dual-draft."
+            "Unknown critic strategy. Use one of: "
+            "strict-rewrite, no-rewrite, soft-gated, dual-draft, minimal-rewrite, auto."
         )
     return norm
+
+
+def _infer_auto_critic_strategy(question: str) -> tuple[str, str]:
+    q = (question or "").lower()
+
+    domain_count = 0
+    market_keys = ["price", "return", "month", "year", "52-week", "open", "market"]
+    fund_keys = ["p/e", "pe ratio", "market cap", "fundamental", "eps", "large-cap"]
+    sent_keys = ["sentiment", "news", "headline", "bullish", "bearish"]
+    if any(k in q for k in market_keys):
+        domain_count += 1
+    if any(k in q for k in fund_keys):
+        domain_count += 1
+    if any(k in q for k in sent_keys):
+        domain_count += 1
+
+    hard_markers = [
+        "top 3",
+        "which",
+        " but ",
+        " and ",
+        "for each",
+        "closer to",
+        "have grown more than",
+        "return the",
+        "compare",
+    ]
+    complexity_score = sum(1 for m in hard_markers if m in q)
+
+    if complexity_score >= 4 or domain_count >= 3:
+        return "no-rewrite", "auto:no-rewrite(high-complexity)"
+    if complexity_score >= 2 or domain_count == 2:
+        return "soft-gated", "auto:soft-gated(medium-complexity)"
+    return "strict-rewrite", "auto:strict-rewrite(low-complexity)"
 
 
 def _orchestrate(client: OpenAI, model: str, question: str) -> dict:
@@ -275,6 +332,34 @@ def _critic_score_candidate(
     return conf, [str(x) for x in issues]
 
 
+def _minimal_rewrite(
+    client: OpenAI,
+    model: str,
+    question: str,
+    packed_specialists: str,
+    draft_answer: str,
+    critic_issues: list[str],
+) -> str:
+    issues_text = "\n".join(f"- {x}" for x in critic_issues) if critic_issues else "- none"
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": MINIMAL_REWRITE_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Question:\n{question}\n\n"
+                    f"Specialist outputs:\n{packed_specialists}\n\n"
+                    f"Critic issues:\n{issues_text}\n\n"
+                    f"Draft answer:\n{draft_answer}"
+                ),
+            },
+        ],
+        temperature=0,
+    )
+    return resp.choices[0].message.content or draft_answer
+
+
 def _aggregate_answers(
     client: OpenAI,
     model: str,
@@ -319,7 +404,12 @@ def run_multi_agent_orchestrator(
     critic_strategy: str = DEFAULT_CRITIC_STRATEGY,
 ) -> dict:
     start = time.time()
-    strategy = _normalize_critic_strategy(critic_strategy)
+    requested_strategy = _normalize_critic_strategy(critic_strategy)
+    strategy = requested_strategy
+    strategy_note = requested_strategy
+    if requested_strategy == "auto":
+        strategy, strategy_note = _infer_auto_critic_strategy(question)
+
     plan = _orchestrate(client, model, question)
 
     specialists: list[AgentResult] = []
@@ -338,17 +428,49 @@ def run_multi_agent_orchestrator(
     draft_a = _synthesize_draft(client, model, question, packed_plain)
     conf_a, issues_a, rewrite_a = _critic_review_draft(client, model, question, packed_plain, draft_a)
 
+    rewrite_applied = False
+    gate_triggered: bool | None = None
+    draft_choice = "A"
+    critic_score_a: float | None = None
+    critic_score_b: float | None = None
+
     if strategy == "strict-rewrite":
         final_answer = rewrite_a
         final_conf = conf_a
         final_issues = issues_a
-        strategy_note = "strict-rewrite"
-    elif strategy == "soft-gated":
-        high_risk = conf_a < 0.58 or len(issues_a) >= 3
-        final_answer = rewrite_a if high_risk else draft_a
+        rewrite_applied = True
+        draft_choice = "rewrite"
+    elif strategy == "no-rewrite":
+        final_answer = draft_a
         final_conf = conf_a
         final_issues = issues_a
-        strategy_note = f"soft-gated({'rewrite' if high_risk else 'keep-draft'})"
+        rewrite_applied = False
+        draft_choice = "A"
+    elif strategy == "soft-gated":
+        gate_triggered = conf_a < 0.58 or len(issues_a) >= 3
+        final_answer = rewrite_a if gate_triggered else draft_a
+        final_conf = conf_a
+        final_issues = issues_a
+        rewrite_applied = bool(gate_triggered)
+        draft_choice = "rewrite" if gate_triggered else "A"
+    elif strategy == "minimal-rewrite":
+        if issues_a:
+            final_answer = _minimal_rewrite(
+                client,
+                model,
+                question,
+                packed_plain,
+                draft_a,
+                issues_a,
+            )
+            rewrite_applied = final_answer != draft_a
+            draft_choice = "minimal-rewrite" if rewrite_applied else "A"
+        else:
+            final_answer = draft_a
+            rewrite_applied = False
+            draft_choice = "A"
+        final_conf = conf_a
+        final_issues = issues_a
     else:  # dual-draft
         packed_with_tags = _pack_specialist_outputs(specialists, include_confidence_issues=True)
         draft_b = _synthesize_draft(
@@ -365,17 +487,20 @@ def run_multi_agent_orchestrator(
         conf_draft_b, issues_draft_b = _critic_score_candidate(client, model, question, "Draft B", draft_b)
         score_a = conf_draft_a - 0.04 * len(issues_draft_a)
         score_b = conf_draft_b - 0.04 * len(issues_draft_b)
+        critic_score_a = score_a
+        critic_score_b = score_b
 
         if score_b > score_a:
             final_answer = draft_b
             final_conf = conf_draft_b
             final_issues = issues_draft_b
-            strategy_note = "dual-draft(pick-B)"
+            draft_choice = "B"
         else:
             final_answer = draft_a
             final_conf = conf_draft_a
             final_issues = issues_draft_a
-            strategy_note = "dual-draft(pick-A)"
+            draft_choice = "A"
+        rewrite_applied = draft_choice == "B"
 
     critic_result = AgentResult(
         agent_name="Critic",
@@ -383,18 +508,32 @@ def run_multi_agent_orchestrator(
         tools_called=[],
         confidence=final_conf,
         issues_found=[str(x) for x in final_issues],
-        reasoning=f"critic_strategy={strategy_note}",
+        reasoning=f"requested={requested_strategy}; effective={strategy}; note={strategy_note}; choice={draft_choice}",
     )
 
     for res in specialists:
         if critic_result.issues_found:
             res.confidence = min(res.confidence, max(0.4, critic_result.confidence - 0.1))
 
+    diagnostics: dict[str, Any] = {
+        "critic_strategy_requested": requested_strategy,
+        "critic_strategy_effective": strategy,
+        "strategy_note": strategy_note,
+        "rewrite_applied": rewrite_applied,
+        "gate_triggered": gate_triggered,
+        "draft_choice": draft_choice,
+        "critic_score_a": critic_score_a,
+        "critic_score_b": critic_score_b,
+        "critic_confidence": final_conf,
+        "critic_issue_count": len(final_issues),
+    }
+
     return {
         "final_answer": critic_result.answer,
         "agent_results": specialists + [critic_result],
         "elapsed_sec": time.time() - start,
         "architecture": f"orchestrator-specialists-critic[{strategy}]",
+        "diagnostics": diagnostics,
     }
 
 
@@ -439,6 +578,17 @@ def run_multi_agent_pipeline(
         "agent_results": specialists + [aggregator],
         "elapsed_sec": time.time() - start,
         "architecture": "sequential-pipeline",
+        "diagnostics": {
+            "critic_strategy_requested": "n/a",
+            "critic_strategy_effective": "n/a",
+            "rewrite_applied": False,
+            "gate_triggered": None,
+            "draft_choice": "n/a",
+            "critic_score_a": None,
+            "critic_score_b": None,
+            "critic_confidence": None,
+            "critic_issue_count": 0,
+        },
     }
 
 
@@ -486,7 +636,6 @@ def run_multi_agent_parallel(
                     )
                 )
 
-    # Keep deterministic ordering in output.
     name_order = {
         SPECIALIST_CONFIG["market"]["name"]: 0,
         SPECIALIST_CONFIG["fundamental"]["name"]: 1,
@@ -507,6 +656,17 @@ def run_multi_agent_parallel(
         "agent_results": specialists + [aggregator],
         "elapsed_sec": time.time() - start,
         "architecture": "parallel-specialists-aggregator",
+        "diagnostics": {
+            "critic_strategy_requested": "n/a",
+            "critic_strategy_effective": "n/a",
+            "rewrite_applied": False,
+            "gate_triggered": None,
+            "draft_choice": "n/a",
+            "critic_score_a": None,
+            "critic_score_b": None,
+            "critic_confidence": None,
+            "critic_issue_count": 0,
+        },
     }
 
 

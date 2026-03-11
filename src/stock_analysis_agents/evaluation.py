@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 
@@ -8,7 +9,6 @@ from openai import OpenAI
 
 from .baseline import run_baseline
 from .evaluator import run_evaluator
-from .models import AgentResult
 from .multi_agent import run_multi_agent
 from .single_agent import run_single_agent
 
@@ -26,7 +26,107 @@ class EvalRecord:
     bl_time: float = 0.0
     sa_time: float = 0.0
     ma_time: float = 0.0
+    ma_confidence: float = float("nan")
+    ma_critic_issue_count: int = 0
+    ma_rewrite_applied: bool = False
+    ma_gate_triggered: str = ""
+    ma_draft_choice: str = ""
+    ma_critic_strategy_requested: str = ""
+    ma_critic_strategy_effective: str = ""
+    ma_critic_score_a: float = float("nan")
+    ma_critic_score_b: float = float("nan")
+    ma_calibration_abs_error: float = float("nan")
 
+
+def _to_float_or_nan(value: object) -> float:
+    try:
+        if value is None:
+            return float("nan")
+        v = float(value)
+        if math.isfinite(v):
+            return v
+        return float("nan")
+    except Exception:
+        return float("nan")
+
+
+def _build_summary_sheet(df: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for arch, score_col, time_col in [
+        ("Baseline", "bl_score", "bl_time"),
+        ("Single Agent", "sa_score", "sa_time"),
+        ("Multi Agent", "ma_score", "ma_time"),
+    ]:
+        for tier in ["easy", "medium", "hard", "all"]:
+            subset = df if tier == "all" else df[df["complexity"] == tier]
+            valid = subset[subset[score_col] >= 0]
+            avg_score = float(valid[score_col].mean()) if len(valid) else 0.0
+            rows.append(
+                {
+                    "architecture": arch,
+                    "difficulty": tier,
+                    "questions": int(len(valid)),
+                    "avg_score_3": round(avg_score, 3),
+                    "accuracy_pct": round(avg_score / 3.0 * 100.0, 1),
+                    "avg_time_sec": round(float(subset[time_col].mean()) if len(subset) else 0.0, 3),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _build_calibration_sheet(df: pd.DataFrame) -> pd.DataFrame:
+    # Only MA currently exports explicit confidence in this evaluator.
+    conf = pd.to_numeric(df.get("ma_confidence"), errors="coerce")
+    score_norm = pd.to_numeric(df.get("ma_score"), errors="coerce") / 3.0
+    valid = pd.DataFrame({"conf": conf, "score_norm": score_norm}).dropna()
+
+    rows: list[dict[str, object]] = []
+    if len(valid) == 0:
+        rows.append(
+            {
+                "segment": "overall",
+                "count": 0,
+                "mean_conf": float("nan"),
+                "mean_score_norm": float("nan"),
+                "mae_conf_vs_score": float("nan"),
+                "pearson_conf_score": float("nan"),
+            }
+        )
+        return pd.DataFrame(rows)
+
+    mae = float((valid["conf"] - valid["score_norm"]).abs().mean())
+    corr = float(valid["conf"].corr(valid["score_norm"])) if len(valid) > 1 else float("nan")
+    rows.append(
+        {
+            "segment": "overall",
+            "count": int(len(valid)),
+            "mean_conf": round(float(valid["conf"].mean()), 4),
+            "mean_score_norm": round(float(valid["score_norm"].mean()), 4),
+            "mae_conf_vs_score": round(mae, 4),
+            "pearson_conf_score": round(corr, 4) if math.isfinite(corr) else float("nan"),
+        }
+    )
+
+    bins = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    labels = ["0.0-0.2", "0.2-0.4", "0.4-0.6", "0.6-0.8", "0.8-1.0"]
+    valid = valid.copy()
+    valid["conf_bin"] = pd.cut(valid["conf"], bins=bins, labels=labels, include_lowest=True)
+    for label in labels:
+        seg = valid[valid["conf_bin"] == label]
+        if len(seg) == 0:
+            continue
+        rows.append(
+            {
+                "segment": f"bin:{label}",
+                "count": int(len(seg)),
+                "mean_conf": round(float(seg["conf"].mean()), 4),
+                "mean_score_norm": round(float(seg["score_norm"].mean()), 4),
+                "mae_conf_vs_score": round(float((seg["conf"] - seg["score_norm"]).abs().mean()), 4),
+                "pearson_conf_score": float("nan"),
+            }
+        )
+
+    return pd.DataFrame(rows)
 
 
 def run_full_evaluation(
@@ -51,12 +151,12 @@ def run_full_evaluation(
 
         t0 = time.time()
         bl = run_baseline(client, model, q["question"])
-        rec.bl_time = round(time.time() - t0, 2)
+        rec.bl_time = round(time.time() - t0, 3)
         rec.bl_score = run_evaluator(client, model, q["question"], q["expected"], bl.answer).get("score", -1)
 
         t0 = time.time()
         sa = run_single_agent(client, model, tool_functions, q["question"], verbose=False)
-        rec.sa_time = round(time.time() - t0, 2)
+        rec.sa_time = round(time.time() - t0, 3)
         rec.sa_score = run_evaluator(client, model, q["question"], q["expected"], sa.answer).get("score", -1)
 
         t0 = time.time()
@@ -69,12 +169,33 @@ def run_full_evaluation(
             architecture=multi_architecture,
             critic_strategy=critic_strategy,
         )
-        rec.ma_time = round(time.time() - t0, 2)
+        rec.ma_time = round(time.time() - t0, 3)
         rec.ma_score = run_evaluator(client, model, q["question"], q["expected"], ma.get("final_answer", "")).get("score", -1)
+
+        # Pull diagnostics from orchestrator output when available.
+        diag = ma.get("diagnostics", {}) if isinstance(ma.get("diagnostics", {}), dict) else {}
+        rec.ma_confidence = _to_float_or_nan(diag.get("critic_confidence"))
+        rec.ma_critic_issue_count = int(diag.get("critic_issue_count", 0) or 0)
+        rec.ma_rewrite_applied = bool(diag.get("rewrite_applied", False))
+        gate = diag.get("gate_triggered", "")
+        rec.ma_gate_triggered = "" if gate is None else str(gate)
+        rec.ma_draft_choice = str(diag.get("draft_choice", ""))
+        rec.ma_critic_strategy_requested = str(diag.get("critic_strategy_requested", ""))
+        rec.ma_critic_strategy_effective = str(diag.get("critic_strategy_effective", ""))
+        rec.ma_critic_score_a = _to_float_or_nan(diag.get("critic_score_a"))
+        rec.ma_critic_score_b = _to_float_or_nan(diag.get("critic_score_b"))
+
+        if math.isfinite(rec.ma_confidence) and rec.ma_score >= 0:
+            rec.ma_calibration_abs_error = abs(rec.ma_confidence - (rec.ma_score / 3.0))
 
         records.append(rec)
 
     df = pd.DataFrame([r.__dict__ for r in records])
+    summary = _build_summary_sheet(df)
+    calibration = _build_calibration_sheet(df)
+
     with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Results")
+        summary.to_excel(writer, index=False, sheet_name="Summary")
+        calibration.to_excel(writer, index=False, sheet_name="Calibration")
     return output_xlsx

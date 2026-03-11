@@ -71,6 +71,18 @@ Return STRICT JSON only:
 {"confidence": 0.0, "issues": ["..."], "final_answer": "..."}
 """
 
+CRITIC_DRAFT_SCORE_PROMPT = """
+You are evaluating one candidate final answer for a finance QA task.
+Return STRICT JSON only:
+{"confidence": 0.0, "issues": ["..."]}
+Rules:
+- confidence in [0,1]
+- issues should list concrete deficits (missing fields, weak support, contradictions)
+- output JSON only
+"""
+
+DEFAULT_CRITIC_STRATEGY = "strict-rewrite"
+VALID_CRITIC_STRATEGIES = {"strict-rewrite", "soft-gated", "dual-draft"}
 
 
 def _parse_json(text: str, fallback: dict) -> dict:
@@ -79,6 +91,23 @@ def _parse_json(text: str, fallback: dict) -> dict:
     except Exception:
         return fallback
 
+
+def _normalize_critic_strategy(strategy: str | None) -> str:
+    raw = (strategy or DEFAULT_CRITIC_STRATEGY).strip().lower().replace("_", "-")
+    aliases = {
+        "strict": "strict-rewrite",
+        "default": "strict-rewrite",
+        "soft": "soft-gated",
+        "soft-gate": "soft-gated",
+        "dual": "dual-draft",
+        "dual-draft-choice": "dual-draft",
+    }
+    norm = aliases.get(raw, raw)
+    if norm not in VALID_CRITIC_STRATEGIES:
+        raise ValueError(
+            "Unknown critic strategy. Use one of: strict-rewrite, soft-gated, dual-draft."
+        )
+    return norm
 
 
 def _orchestrate(client: OpenAI, model: str, question: str) -> dict:
@@ -100,7 +129,6 @@ def _orchestrate(client: OpenAI, model: str, question: str) -> dict:
     for a in agents:
         subtasks.setdefault(a, f"Answer from {a} perspective with tool evidence: {question}")
     return {"agents": agents, "subtasks": subtasks}
-
 
 
 def _run_one_specialist(
@@ -127,6 +155,124 @@ def _run_one_specialist(
     result.confidence = 0.75
     return result
 
+
+def _pack_specialist_outputs(
+    specialist_results: list[AgentResult],
+    include_confidence_issues: bool = False,
+) -> str:
+    if not include_confidence_issues:
+        return "\n\n".join(
+            f"[{r.agent_name}]\nTools: {r.tools_called}\nAnswer: {r.answer}" for r in specialist_results
+        )
+
+    return "\n\n".join(
+        (
+            f"[{r.agent_name}]\n"
+            f"Tools: {r.tools_called}\n"
+            f"Confidence: {r.confidence:.0%}\n"
+            f"Issues: {', '.join(r.issues_found) if r.issues_found else 'none'}\n"
+            f"Answer: {r.answer}"
+        )
+        for r in specialist_results
+    )
+
+
+def _synthesize_draft(
+    client: OpenAI,
+    model: str,
+    question: str,
+    packed_specialists: str,
+    extra_instruction: str | None = None,
+) -> str:
+    system_prompt = SYNTHESIS_PROMPT
+    if extra_instruction:
+        system_prompt = f"{SYNTHESIS_PROMPT} {extra_instruction}"
+
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": f"Question:\n{question}\n\nSpecialist outputs:\n{packed_specialists}",
+            },
+        ],
+        temperature=0,
+    )
+    return resp.choices[0].message.content or "Unable to synthesize answer."
+
+
+def _critic_review_draft(
+    client: OpenAI,
+    model: str,
+    question: str,
+    packed_specialists: str,
+    draft_answer: str,
+) -> tuple[float, list[str], str]:
+    crit = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": CRITIC_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Question:\n{question}\n\n"
+                    f"Specialist outputs:\n{packed_specialists}\n\n"
+                    f"Draft answer:\n{draft_answer}"
+                ),
+            },
+        ],
+        temperature=0,
+    )
+    cdata = _parse_json(
+        crit.choices[0].message.content or "",
+        {"confidence": 0.6, "issues": ["Critic output not valid JSON."], "final_answer": draft_answer},
+    )
+    try:
+        conf = float(cdata.get("confidence", 0.6))
+    except Exception:
+        conf = 0.6
+    conf = max(0.0, min(1.0, conf))
+    issues = cdata.get("issues", [])
+    if not isinstance(issues, list):
+        issues = [str(issues)]
+    clean_issues = [str(x) for x in issues]
+    final_answer = cdata.get("final_answer", draft_answer) or draft_answer
+    return conf, clean_issues, final_answer
+
+
+def _critic_score_candidate(
+    client: OpenAI,
+    model: str,
+    question: str,
+    candidate_label: str,
+    candidate_answer: str,
+) -> tuple[float, list[str]]:
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": CRITIC_DRAFT_SCORE_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Question:\n{question}\n\n"
+                    f"Candidate: {candidate_label}\n"
+                    f"Answer:\n{candidate_answer}"
+                ),
+            },
+        ],
+        temperature=0,
+    )
+    data = _parse_json(resp.choices[0].message.content or "", {"confidence": 0.5, "issues": ["Invalid JSON"]})
+    try:
+        conf = float(data.get("confidence", 0.5))
+    except Exception:
+        conf = 0.5
+    conf = max(0.0, min(1.0, conf))
+    issues = data.get("issues", [])
+    if not isinstance(issues, list):
+        issues = [str(issues)]
+    return conf, [str(x) for x in issues]
 
 
 def _aggregate_answers(
@@ -164,15 +310,16 @@ def _aggregate_answers(
     )
 
 
-
 def run_multi_agent_orchestrator(
     client: OpenAI,
     model: str,
     tool_functions: dict,
     question: str,
     verbose: bool = False,
+    critic_strategy: str = DEFAULT_CRITIC_STRATEGY,
 ) -> dict:
     start = time.time()
+    strategy = _normalize_critic_strategy(critic_strategy)
     plan = _orchestrate(client, model, question)
 
     specialists: list[AgentResult] = []
@@ -187,56 +334,56 @@ def run_multi_agent_orchestrator(
         )
         specialists.append(result)
 
-    packed = "\n\n".join(
-        f"[{r.agent_name}]\nTools: {r.tools_called}\nAnswer: {r.answer}" for r in specialists
-    )
+    packed_plain = _pack_specialist_outputs(specialists, include_confidence_issues=False)
+    draft_a = _synthesize_draft(client, model, question, packed_plain)
+    conf_a, issues_a, rewrite_a = _critic_review_draft(client, model, question, packed_plain, draft_a)
 
-    synth = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYNTHESIS_PROMPT},
-            {"role": "user", "content": f"Question:\n{question}\n\nSpecialist outputs:\n{packed}"},
-        ],
-        temperature=0,
-    )
-    draft = synth.choices[0].message.content or "Unable to synthesize answer."
+    if strategy == "strict-rewrite":
+        final_answer = rewrite_a
+        final_conf = conf_a
+        final_issues = issues_a
+        strategy_note = "strict-rewrite"
+    elif strategy == "soft-gated":
+        high_risk = conf_a < 0.58 or len(issues_a) >= 3
+        final_answer = rewrite_a if high_risk else draft_a
+        final_conf = conf_a
+        final_issues = issues_a
+        strategy_note = f"soft-gated({'rewrite' if high_risk else 'keep-draft'})"
+    else:  # dual-draft
+        packed_with_tags = _pack_specialist_outputs(specialists, include_confidence_issues=True)
+        draft_b = _synthesize_draft(
+            client,
+            model,
+            question,
+            packed_with_tags,
+            extra_instruction=(
+                "Use confidence/issues tags only to improve precision; "
+                "do not add extra disclaimers unless required by missing data."
+            ),
+        )
+        conf_draft_a, issues_draft_a = _critic_score_candidate(client, model, question, "Draft A", draft_a)
+        conf_draft_b, issues_draft_b = _critic_score_candidate(client, model, question, "Draft B", draft_b)
+        score_a = conf_draft_a - 0.04 * len(issues_draft_a)
+        score_b = conf_draft_b - 0.04 * len(issues_draft_b)
 
-    crit = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": CRITIC_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Question:\n{question}\n\n"
-                    f"Specialist outputs:\n{packed}\n\n"
-                    f"Draft answer:\n{draft}"
-                ),
-            },
-        ],
-        temperature=0,
-    )
-    cdata = _parse_json(
-        crit.choices[0].message.content or "",
-        {"confidence": 0.6, "issues": ["Critic output not valid JSON."], "final_answer": draft},
-    )
-
-    try:
-        conf = float(cdata.get("confidence", 0.6))
-    except Exception:
-        conf = 0.6
-    conf = max(0.0, min(1.0, conf))
-    issues = cdata.get("issues", [])
-    if not isinstance(issues, list):
-        issues = [str(issues)]
-    final_answer = cdata.get("final_answer", draft) or draft
+        if score_b > score_a:
+            final_answer = draft_b
+            final_conf = conf_draft_b
+            final_issues = issues_draft_b
+            strategy_note = "dual-draft(pick-B)"
+        else:
+            final_answer = draft_a
+            final_conf = conf_draft_a
+            final_issues = issues_draft_a
+            strategy_note = "dual-draft(pick-A)"
 
     critic_result = AgentResult(
         agent_name="Critic",
         answer=final_answer,
         tools_called=[],
-        confidence=conf,
-        issues_found=[str(x) for x in issues],
+        confidence=final_conf,
+        issues_found=[str(x) for x in final_issues],
+        reasoning=f"critic_strategy={strategy_note}",
     )
 
     for res in specialists:
@@ -247,9 +394,8 @@ def run_multi_agent_orchestrator(
         "final_answer": critic_result.answer,
         "agent_results": specialists + [critic_result],
         "elapsed_sec": time.time() - start,
-        "architecture": "orchestrator-specialists-critic",
+        "architecture": f"orchestrator-specialists-critic[{strategy}]",
     }
-
 
 
 def run_multi_agent_pipeline(
@@ -294,7 +440,6 @@ def run_multi_agent_pipeline(
         "elapsed_sec": time.time() - start,
         "architecture": "sequential-pipeline",
     }
-
 
 
 def run_multi_agent_parallel(
@@ -365,7 +510,6 @@ def run_multi_agent_parallel(
     }
 
 
-
 def run_multi_agent(
     client: OpenAI,
     model: str,
@@ -373,10 +517,18 @@ def run_multi_agent(
     question: str,
     verbose: bool = False,
     architecture: str = "orchestrator",
+    critic_strategy: str = DEFAULT_CRITIC_STRATEGY,
 ) -> dict:
     arch = (architecture or "orchestrator").strip().lower()
     if arch in {"orchestrator", "orchestrator-specialists-critic", "default"}:
-        return run_multi_agent_orchestrator(client, model, tool_functions, question, verbose=verbose)
+        return run_multi_agent_orchestrator(
+            client,
+            model,
+            tool_functions,
+            question,
+            verbose=verbose,
+            critic_strategy=critic_strategy,
+        )
     if arch in {"pipeline", "sequential", "sequential-pipeline"}:
         return run_multi_agent_pipeline(client, model, tool_functions, question, verbose=verbose)
     if arch in {"parallel", "parallel-specialists-aggregator"}:

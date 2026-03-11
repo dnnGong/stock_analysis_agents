@@ -7,6 +7,10 @@ A practical Python SDK for stock analysis with:
   - `orchestrator + specialists + critic`
   - `sequential pipeline`
   - `parallel specialists + aggregator`
+- critic strategies for orchestrator mode:
+  - `strict-rewrite` (default)
+  - `soft-gated`
+  - `dual-draft`
 - evaluator and benchmark runner
 
 This project is extracted from `mp3_assignment_chenlei1_dnngong2.ipynb` and packaged for reuse.
@@ -41,9 +45,23 @@ User Question
    v
 [Critic]
    |- checks missing fields / contradictions / support
-   |- outputs: confidence, issues, corrected final answer
+   |- outputs: confidence, issues, corrected final answer (strategy-dependent)
    v
 Final Answer (+ agent_results, elapsed_sec, architecture)
+```
+
+Critic strategy layer (orchestrator only):
+```text
+                        +------------------------------+
+Draft A --------------->| strict-rewrite              |--> final = critic rewrite
+                        +------------------------------+
+                        +------------------------------+
+Draft A + critic score->| soft-gated                  |--> low risk: keep Draft A
+                        |                              |--> high risk: use critic rewrite
+                        +------------------------------+
+Draft A + Draft B ----->| dual-draft                  |--> critic scores both drafts
+                        |                              |--> pick higher-scoring draft
+                        +------------------------------+
 ```
 
 ### 2) Sequential Pipeline
@@ -149,6 +167,13 @@ stock-agents ask "Top 3 semiconductor stocks by 1-year return" --arch multi --mu
 stock-agents ask "Top 3 semiconductor stocks by 1-year return" --arch multi --multi-arch parallel
 ```
 
+### Choose critic strategy (orchestrator mode)
+```bash
+stock-agents ask "What is Apple's P/E ratio?" --arch multi --multi-arch orchestrator --critic-strategy strict-rewrite
+stock-agents ask "What is Apple's P/E ratio?" --arch multi --multi-arch orchestrator --critic-strategy soft-gated
+stock-agents ask "What is Apple's P/E ratio?" --arch multi --multi-arch orchestrator --critic-strategy dual-draft
+```
+
 ### Ask with single-agent
 ```bash
 stock-agents ask "Compare the 1-year returns of AAPL, MSFT, GOOGL" --arch single
@@ -166,6 +191,8 @@ stock-agents ask "What is the P/E ratio of Apple (AAPL)?" --provider yahoo --jso
 stock-agents eval --model gpt-4o-mini --multi-arch orchestrator --output results_sdk_mini_orch.xlsx
 stock-agents eval --model gpt-4o-mini --multi-arch pipeline --output results_sdk_mini_pipeline.xlsx
 stock-agents eval --model gpt-4o-mini --multi-arch parallel --output results_sdk_mini_parallel.xlsx
+stock-agents eval --model gpt-4o --multi-arch orchestrator --critic-strategy soft-gated --output results_sdk_4o_orch_soft.xlsx
+stock-agents eval --model gpt-4o --multi-arch orchestrator --critic-strategy dual-draft --output results_sdk_4o_orch_dual.xlsx
 ```
 
 ## Python SDK Usage
@@ -192,6 +219,7 @@ out = run_multi_agent(
     question="For the top 3 semiconductor stocks by 1-year return, what are their P/E ratios?",
     verbose=False,
     architecture="parallel",  # orchestrator | pipeline | parallel
+    critic_strategy="soft-gated",  # orchestrator mode only
 )
 print(out["final_answer"])
 ```

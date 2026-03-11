@@ -36,6 +36,7 @@ def run_full_evaluation(
     tool_functions: dict,
     output_xlsx: str = "results.xlsx",
     multi_architecture: str = "orchestrator",
+    critic_strategy: str = "strict-rewrite",
 ) -> str:
     records: list[EvalRecord] = []
 
@@ -66,6 +67,7 @@ def run_full_evaluation(
             q["question"],
             verbose=False,
             architecture=multi_architecture,
+            critic_strategy=critic_strategy,
         )
         rec.ma_time = round(time.time() - t0, 2)
         rec.ma_score = run_evaluator(client, model, q["question"], q["expected"], ma.get("final_answer", "")).get("score", -1)

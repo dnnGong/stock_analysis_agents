@@ -100,6 +100,7 @@ def main() -> None:
             "  stock-agents ask \"What is the P/E ratio of Apple (AAPL)?\"\n"
             "  stock-agents ask \"Compare AAPL and MSFT 1-year return\" --arch single --provider yahoo\n"
             "  stock-agents ask \"Top 3 semis by 1y return\" --arch multi --multi-arch parallel\n"
+            "  stock-agents ask \"Top 3 semis by 1y return\" --arch multi --multi-arch orchestrator --critic-strategy soft-gated\n"
             "  stock-agents eval --model gpt-4o-mini --provider hybrid --multi-arch pipeline --output results_sdk.xlsx\n"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
@@ -123,6 +124,15 @@ def main() -> None:
         choices=["orchestrator", "pipeline", "parallel"],
         default="orchestrator",
         help="Multi-agent pattern when --arch=multi (default: orchestrator)",
+    )
+    q.add_argument(
+        "--critic-strategy",
+        choices=["strict-rewrite", "soft-gated", "dual-draft"],
+        default="strict-rewrite",
+        help=(
+            "Critic strategy for orchestrator mode only. "
+            "strict-rewrite | soft-gated | dual-draft (default: strict-rewrite)"
+        ),
     )
     q.add_argument(
         "--model",
@@ -175,6 +185,15 @@ def main() -> None:
         choices=["orchestrator", "pipeline", "parallel"],
         default="orchestrator",
         help="Multi-agent pattern for evaluation (default: orchestrator)",
+    )
+    ev.add_argument(
+        "--critic-strategy",
+        choices=["strict-rewrite", "soft-gated", "dual-draft"],
+        default="strict-rewrite",
+        help=(
+            "Critic strategy used when --multi-arch=orchestrator. "
+            "Ignored for pipeline/parallel."
+        ),
     )
 
     db = sub.add_parser(
@@ -242,6 +261,7 @@ def main() -> None:
                 args.question,
                 verbose=args.trace,
                 architecture=args.multi_arch,
+                critic_strategy=args.critic_strategy,
             )
             if args.json:
                 print(json.dumps(_serialize_obj(out), ensure_ascii=False, indent=2, default=str))
@@ -257,6 +277,7 @@ def main() -> None:
             tool_functions=tool_functions,
             output_xlsx=args.output,
             multi_architecture=args.multi_arch,
+            critic_strategy=args.critic_strategy,
         )
         _print_eval_summary(path)
         return

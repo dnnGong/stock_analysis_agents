@@ -1,6 +1,7 @@
 from .benchmark import BENCHMARK_QUESTIONS
 from .config import Settings, load_settings
 from .db_builder import create_local_database, get_distinct_sectors, load_companies_file
+from .structured_logging import is_enabled as structured_log_enabled, log_event
 
 # Optional imports: these require the runtime deps like openai.
 try:
@@ -61,4 +62,6 @@ __all__ = [
     "HybridProvider",
     "FinanceTools",
     "build_tool_function_map",
+    "log_event",
+    "structured_log_enabled",
 ]

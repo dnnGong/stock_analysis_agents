@@ -116,6 +116,8 @@ export STOCK_AGENTS_MODEL_SMALL="gpt-4o-mini"
 export STOCK_AGENTS_MODEL_LARGE="gpt-4o"
 export STOCK_AGENTS_DB_PATH="/absolute/path/to/stocks.db"
 export STOCK_AGENTS_DATA_PROVIDER="hybrid"  # alphavantage | yahoo | hybrid
+export STOCK_AGENTS_STRUCTURED_LOG="1"      # optional: 1 enables JSONL logs
+export STOCK_AGENTS_LOG_PATH="./stock_agents_events.jsonl"  # optional
 ```
 
 Provider notes:
@@ -257,3 +259,7 @@ stock_analysis_agents/
 - `query_local_db` only allows `SELECT` statements for safety.
 - `run_specialist_agent` limits tool calls per turn to reduce oversized API payload failures.
 - Database builder supports both `.csv` and `.xlsx` inputs.
+- Structured logs (JSONL) are disabled by default. Enable with:
+  - `STOCK_AGENTS_STRUCTURED_LOG=1`
+  - optional `STOCK_AGENTS_LOG_PATH=/path/to/events.jsonl`
+  - event types include: `agent.*`, `multi_agent.*`, `evaluation.*`

@@ -7,6 +7,7 @@ from typing import Any
 from openai import OpenAI
 
 from .models import AgentResult
+from .structured_logging import log_event
 
 
 
@@ -23,6 +24,14 @@ def run_specialist_agent(
     verbose: bool = False,
 ) -> AgentResult:
     start_time = time.time()
+    log_event(
+        "agent.start",
+        agent_name=agent_name,
+        model=model,
+        max_iters=max_iters,
+        max_tool_calls_per_turn=max_tool_calls_per_turn,
+        task_preview=(task or "")[:180],
+    )
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -42,6 +51,12 @@ def run_specialist_agent(
             messages=messages,
             tools=tool_schemas if tool_schemas else None,
             temperature=0,
+        )
+        log_event(
+            "agent.llm_response",
+            agent_name=agent_name,
+            iteration=iterations,
+            has_tool_calls=bool(response.choices[0].message.tool_calls),
         )
 
         msg = response.choices[0].message
@@ -78,6 +93,13 @@ def run_specialist_agent(
 
                 if verbose:
                     print(f"[{agent_name}] Calling: {func_name}({func_args})")
+                log_event(
+                    "agent.tool_call.start",
+                    agent_name=agent_name,
+                    iteration=iterations,
+                    tool_name=func_name,
+                    args=func_args,
+                )
 
                 if func_name not in tool_functions:
                     tool_out = {"error": f"Tool {func_name} not found."}
@@ -86,6 +108,14 @@ def run_specialist_agent(
                         tool_out = tool_functions[func_name](**func_args)
                     except Exception as exc:
                         tool_out = {"error": str(exc)}
+                log_event(
+                    "agent.tool_call.end",
+                    agent_name=agent_name,
+                    iteration=iterations,
+                    tool_name=func_name,
+                    ok="error" not in tool_out,
+                    output_preview=str(tool_out)[:240],
+                )
 
                 tools_called.append(func_name)
                 raw_data[f"{func_name}:{len(tools_called)}"] = tool_out

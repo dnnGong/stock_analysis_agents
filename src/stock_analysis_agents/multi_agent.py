@@ -10,6 +10,7 @@ from openai import OpenAI
 from .agent_runner import run_specialist_agent
 from .models import AgentResult
 from .schemas import FUNDAMENTAL_TOOLS, MARKET_TOOLS, SENTIMENT_TOOLS
+from .structured_logging import log_event
 
 
 SPECIALIST_CONFIG = {
@@ -404,6 +405,13 @@ def run_multi_agent_orchestrator(
     critic_strategy: str = DEFAULT_CRITIC_STRATEGY,
 ) -> dict:
     start = time.time()
+    log_event(
+        "multi_agent.start",
+        architecture="orchestrator",
+        model=model,
+        critic_strategy_requested=critic_strategy,
+        question_preview=(question or "")[:180],
+    )
     requested_strategy = _normalize_critic_strategy(critic_strategy)
     strategy = requested_strategy
     strategy_note = requested_strategy
@@ -411,6 +419,7 @@ def run_multi_agent_orchestrator(
         strategy, strategy_note = _infer_auto_critic_strategy(question)
 
     plan = _orchestrate(client, model, question)
+    log_event("multi_agent.plan", architecture="orchestrator", agents=plan.get("agents", []))
 
     specialists: list[AgentResult] = []
     for key in plan["agents"]:
@@ -527,6 +536,25 @@ def run_multi_agent_orchestrator(
         "critic_confidence": final_conf,
         "critic_issue_count": len(final_issues),
     }
+    log_event(
+        "multi_agent.critic_decision",
+        architecture="orchestrator",
+        critic_strategy_requested=requested_strategy,
+        critic_strategy_effective=strategy,
+        rewrite_applied=rewrite_applied,
+        gate_triggered=gate_triggered,
+        draft_choice=draft_choice,
+        critic_score_a=critic_score_a,
+        critic_score_b=critic_score_b,
+        critic_confidence=final_conf,
+        critic_issue_count=len(final_issues),
+    )
+    log_event(
+        "multi_agent.end",
+        architecture=f"orchestrator-specialists-critic[{strategy}]",
+        elapsed_sec=round(time.time() - start, 3),
+        specialist_count=len(specialists),
+    )
 
     return {
         "final_answer": critic_result.answer,
@@ -545,6 +573,12 @@ def run_multi_agent_pipeline(
     verbose: bool = False,
 ) -> dict:
     start = time.time()
+    log_event(
+        "multi_agent.start",
+        architecture="sequential-pipeline",
+        model=model,
+        question_preview=(question or "")[:180],
+    )
 
     stage1_task = (
         "Step 1 (market discovery): extract relevant tickers/price constraints for this question.\n"
@@ -573,7 +607,7 @@ def run_multi_agent_pipeline(
         architecture_name="sequential-pipeline",
     )
 
-    return {
+    out = {
         "final_answer": aggregator.answer,
         "agent_results": specialists + [aggregator],
         "elapsed_sec": time.time() - start,
@@ -590,6 +624,13 @@ def run_multi_agent_pipeline(
             "critic_issue_count": 0,
         },
     }
+    log_event(
+        "multi_agent.end",
+        architecture=out["architecture"],
+        elapsed_sec=round(out["elapsed_sec"], 3),
+        specialist_count=len(specialists),
+    )
+    return out
 
 
 def run_multi_agent_parallel(
@@ -600,6 +641,12 @@ def run_multi_agent_parallel(
     verbose: bool = False,
 ) -> dict:
     start = time.time()
+    log_event(
+        "multi_agent.start",
+        architecture="parallel-specialists-aggregator",
+        model=model,
+        question_preview=(question or "")[:180],
+    )
 
     tasks = {
         "market": f"Price/market view for question: {question}",
@@ -651,7 +698,7 @@ def run_multi_agent_parallel(
         architecture_name="parallel-specialists-aggregator",
     )
 
-    return {
+    out = {
         "final_answer": aggregator.answer,
         "agent_results": specialists + [aggregator],
         "elapsed_sec": time.time() - start,
@@ -668,6 +715,13 @@ def run_multi_agent_parallel(
             "critic_issue_count": 0,
         },
     }
+    log_event(
+        "multi_agent.end",
+        architecture=out["architecture"],
+        elapsed_sec=round(out["elapsed_sec"], 3),
+        specialist_count=len(specialists),
+    )
+    return out
 
 
 def run_multi_agent(

@@ -11,6 +11,7 @@ from .baseline import run_baseline
 from .evaluator import run_evaluator
 from .multi_agent import run_multi_agent
 from .single_agent import run_single_agent
+from .structured_logging import log_event
 
 
 @dataclass
@@ -139,6 +140,14 @@ def run_full_evaluation(
     critic_strategy: str = "strict-rewrite",
 ) -> str:
     records: list[EvalRecord] = []
+    log_event(
+        "evaluation.start",
+        model=model,
+        total_questions=len(questions),
+        multi_architecture=multi_architecture,
+        critic_strategy=critic_strategy,
+        output_xlsx=output_xlsx,
+    )
 
     for q in questions:
         rec = EvalRecord(
@@ -189,6 +198,23 @@ def run_full_evaluation(
             rec.ma_calibration_abs_error = abs(rec.ma_confidence - (rec.ma_score / 3.0))
 
         records.append(rec)
+        log_event(
+            "evaluation.question",
+            question_id=rec.question_id,
+            difficulty=rec.complexity,
+            category=rec.category,
+            bl_score=rec.bl_score,
+            sa_score=rec.sa_score,
+            ma_score=rec.ma_score,
+            bl_time=rec.bl_time,
+            sa_time=rec.sa_time,
+            ma_time=rec.ma_time,
+            ma_confidence=rec.ma_confidence,
+            ma_critic_issue_count=rec.ma_critic_issue_count,
+            ma_strategy_effective=rec.ma_critic_strategy_effective,
+            ma_rewrite_applied=rec.ma_rewrite_applied,
+            ma_calibration_abs_error=rec.ma_calibration_abs_error,
+        )
 
     df = pd.DataFrame([r.__dict__ for r in records])
     summary = _build_summary_sheet(df)
@@ -198,4 +224,11 @@ def run_full_evaluation(
         df.to_excel(writer, index=False, sheet_name="Results")
         summary.to_excel(writer, index=False, sheet_name="Summary")
         calibration.to_excel(writer, index=False, sheet_name="Calibration")
+    log_event(
+        "evaluation.end",
+        output_xlsx=output_xlsx,
+        baseline_avg=float(df["bl_score"].mean()) if len(df) else float("nan"),
+        single_avg=float(df["sa_score"].mean()) if len(df) else float("nan"),
+        multi_avg=float(df["ma_score"].mean()) if len(df) else float("nan"),
+    )
     return output_xlsx

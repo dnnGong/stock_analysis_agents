@@ -9,8 +9,11 @@ A practical Python SDK for stock analysis with:
   - `parallel specialists + aggregator`
 - critic strategies for orchestrator mode:
   - `strict-rewrite` (default)
+  - `no-rewrite`
   - `soft-gated`
   - `dual-draft`
+  - `minimal-rewrite`
+  - `auto` (question-aware strategy selector)
 - evaluator and benchmark runner
 
 This project is extracted from `mp3_assignment_chenlei1_dnngong2.ipynb` and packaged for reuse.
@@ -56,11 +59,20 @@ Critic strategy layer (orchestrator only):
 Draft A --------------->| strict-rewrite              |--> final = critic rewrite
                         +------------------------------+
                         +------------------------------+
+Draft A + critic score->| no-rewrite                  |--> final = Draft A
+                        +------------------------------+
+                        +------------------------------+
 Draft A + critic score->| soft-gated                  |--> low risk: keep Draft A
                         |                              |--> high risk: use critic rewrite
                         +------------------------------+
+                        +------------------------------+
+Draft A + issues ------>| minimal-rewrite             |--> patch only risky/missing parts
+                        +------------------------------+
 Draft A + Draft B ----->| dual-draft                  |--> critic scores both drafts
                         |                              |--> pick higher-scoring draft
+                        +------------------------------+
+                        +------------------------------+
+Question text --------->| auto                        |--> choose strict/no/soft by complexity
                         +------------------------------+
 ```
 
@@ -152,6 +164,7 @@ Expected input columns (case-insensitive, common variants supported):
 stock-agents -h
 stock-agents ask -h
 stock-agents eval -h
+stock-agents eval-strategies -h
 stock-agents build-db -h
 ```
 
@@ -172,9 +185,14 @@ stock-agents ask "Top 3 semiconductor stocks by 1-year return" --arch multi --mu
 ### Choose critic strategy (orchestrator mode)
 ```bash
 stock-agents ask "What is Apple's P/E ratio?" --arch multi --multi-arch orchestrator --critic-strategy strict-rewrite
+stock-agents ask "What is Apple's P/E ratio?" --arch multi --multi-arch orchestrator --critic-strategy no-rewrite
 stock-agents ask "What is Apple's P/E ratio?" --arch multi --multi-arch orchestrator --critic-strategy soft-gated
 stock-agents ask "What is Apple's P/E ratio?" --arch multi --multi-arch orchestrator --critic-strategy dual-draft
+stock-agents ask "What is Apple's P/E ratio?" --arch multi --multi-arch orchestrator --critic-strategy minimal-rewrite
+stock-agents ask "What is Apple's P/E ratio?" --arch multi --multi-arch orchestrator --critic-strategy auto
 ```
+
+`ask` output now includes a **Critic Diagnostics** section (strategy, rewrite applied, gate, draft choice, critic confidence/issues).
 
 ### Ask with single-agent
 ```bash
@@ -195,7 +213,25 @@ stock-agents eval --model gpt-4o-mini --multi-arch pipeline --output results_sdk
 stock-agents eval --model gpt-4o-mini --multi-arch parallel --output results_sdk_mini_parallel.xlsx
 stock-agents eval --model gpt-4o --multi-arch orchestrator --critic-strategy soft-gated --output results_sdk_4o_orch_soft.xlsx
 stock-agents eval --model gpt-4o --multi-arch orchestrator --critic-strategy dual-draft --output results_sdk_4o_orch_dual.xlsx
+stock-agents eval --model gpt-4o --multi-arch orchestrator --critic-strategy no-rewrite --output results_sdk_4o_orch_norewrite.xlsx
+stock-agents eval --model gpt-4o --multi-arch orchestrator --critic-strategy minimal-rewrite --output results_sdk_4o_orch_minrewrite.xlsx
+stock-agents eval --model gpt-4o --multi-arch orchestrator --critic-strategy auto --output results_sdk_4o_orch_auto.xlsx
 ```
+
+Each evaluation xlsx now includes:
+- `Results` (per-question scores + MA diagnostics columns)
+- `Summary` (Q3-style accuracy by architecture and difficulty)
+- `Calibration` (confidence-vs-score calibration metrics)
+
+### Compare all critic strategies in one command
+```bash
+stock-agents eval-strategies --model gpt-4o --output-prefix results_strategy_compare
+stock-agents eval-strategies --model gpt-4o --strategies strict-rewrite,no-rewrite,soft-gated,dual-draft,minimal-rewrite,auto
+```
+
+This command writes one xlsx per strategy plus a consolidated CSV summary:
+- `results_strategy_compare_<strategy>.xlsx`
+- `results_strategy_compare_summary.csv`
 
 ## Python SDK Usage
 ```python
@@ -220,10 +256,11 @@ out = run_multi_agent(
     tool_functions=func_map,
     question="For the top 3 semiconductor stocks by 1-year return, what are their P/E ratios?",
     verbose=False,
-    architecture="parallel",  # orchestrator | pipeline | parallel
-    critic_strategy="soft-gated",  # orchestrator mode only
+    architecture="orchestrator",  # orchestrator | pipeline | parallel
+    critic_strategy="auto",       # strict-rewrite | no-rewrite | soft-gated | dual-draft | minimal-rewrite | auto
 )
 print(out["final_answer"])
+print(out["diagnostics"])
 ```
 
 ## Project Structure
@@ -263,3 +300,4 @@ stock_analysis_agents/
   - `STOCK_AGENTS_STRUCTURED_LOG=1`
   - optional `STOCK_AGENTS_LOG_PATH=/path/to/events.jsonl`
   - event types include: `agent.*`, `multi_agent.*`, `evaluation.*`
+  - each line is a JSON object, suitable for pandas/duckdb/ELK ingestion

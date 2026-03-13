@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, is_dataclass
+import glob
 import json
 import os
 from typing import Any
@@ -146,6 +147,34 @@ def main() -> None:
         ),
     )
     q.add_argument(
+        "--soft-gate-conf-threshold",
+        type=float,
+        default=0.58,
+        help="Global confidence threshold for soft-gated strategy (default: 0.58)",
+    )
+    q.add_argument(
+        "--soft-gate-issue-threshold",
+        type=int,
+        default=3,
+        help="Global issue-count threshold for soft-gated strategy (default: 3)",
+    )
+    q.add_argument(
+        "--soft-gate-stratified-thresholds",
+        action="store_true",
+        help="Use per-difficulty thresholds (easy/medium/hard) instead of one global threshold.",
+    )
+    q.add_argument(
+        "--soft-gate-data-driven",
+        choices=["off", "global", "stratified"],
+        default="off",
+        help="Enable data-driven threshold selection from historical results.",
+    )
+    q.add_argument(
+        "--soft-gate-history-glob",
+        default="",
+        help="Glob pattern for historical xlsx files, e.g. './results_*.xlsx'.",
+    )
+    q.add_argument(
         "--model",
         default=None,
         help="Override model name, e.g. gpt-4o-mini or gpt-4o",
@@ -206,6 +235,34 @@ def main() -> None:
             "Ignored for pipeline/parallel."
         ),
     )
+    ev.add_argument(
+        "--soft-gate-conf-threshold",
+        type=float,
+        default=0.58,
+        help="Global confidence threshold for soft-gated strategy (default: 0.58)",
+    )
+    ev.add_argument(
+        "--soft-gate-issue-threshold",
+        type=int,
+        default=3,
+        help="Global issue-count threshold for soft-gated strategy (default: 3)",
+    )
+    ev.add_argument(
+        "--soft-gate-stratified-thresholds",
+        action="store_true",
+        help="Use per-difficulty thresholds (easy/medium/hard) instead of one global threshold.",
+    )
+    ev.add_argument(
+        "--soft-gate-data-driven",
+        choices=["off", "global", "stratified"],
+        default="off",
+        help="Enable data-driven threshold selection from historical results.",
+    )
+    ev.add_argument(
+        "--soft-gate-history-glob",
+        default="",
+        help="Glob pattern for historical xlsx files, e.g. './results_*.xlsx'.",
+    )
 
     evs = sub.add_parser(
         "eval-strategies",
@@ -238,6 +295,34 @@ def main() -> None:
             "Comma-separated critic strategies for orchestrator MA. "
             "Example: strict-rewrite,no-rewrite,soft-gated"
         ),
+    )
+    evs.add_argument(
+        "--soft-gate-conf-threshold",
+        type=float,
+        default=0.58,
+        help="Global confidence threshold for soft-gated strategy (default: 0.58)",
+    )
+    evs.add_argument(
+        "--soft-gate-issue-threshold",
+        type=int,
+        default=3,
+        help="Global issue-count threshold for soft-gated strategy (default: 3)",
+    )
+    evs.add_argument(
+        "--soft-gate-stratified-thresholds",
+        action="store_true",
+        help="Use per-difficulty thresholds (easy/medium/hard) instead of one global threshold.",
+    )
+    evs.add_argument(
+        "--soft-gate-data-driven",
+        choices=["off", "global", "stratified"],
+        default="off",
+        help="Enable data-driven threshold selection from historical results.",
+    )
+    evs.add_argument(
+        "--soft-gate-history-glob",
+        default="",
+        help="Glob pattern for historical xlsx files, e.g. './results_*.xlsx'.",
     )
 
     db = sub.add_parser(
@@ -289,6 +374,7 @@ def main() -> None:
     provider = make_data_provider(provider_name, settings.alphavantage_api_key)
     tools = FinanceTools(provider=provider, db_path=settings.db_path)
     tool_functions = build_tool_function_map(tools)
+    history_files = glob.glob(args.soft_gate_history_glob) if hasattr(args, "soft_gate_history_glob") and args.soft_gate_history_glob else []
 
     if args.cmd == "ask":
         if args.arch == "single":
@@ -306,6 +392,11 @@ def main() -> None:
                 verbose=args.trace,
                 architecture=args.multi_arch,
                 critic_strategy=args.critic_strategy,
+                soft_gate_conf_threshold=args.soft_gate_conf_threshold,
+                soft_gate_issue_threshold=args.soft_gate_issue_threshold,
+                soft_gate_stratified_thresholds=args.soft_gate_stratified_thresholds,
+                soft_gate_data_mode=args.soft_gate_data_driven,
+                soft_gate_history_files=history_files,
             )
             if args.json:
                 print(json.dumps(_serialize_obj(out), ensure_ascii=False, indent=2, default=str))
@@ -322,6 +413,11 @@ def main() -> None:
             output_xlsx=args.output,
             multi_architecture=args.multi_arch,
             critic_strategy=args.critic_strategy,
+            soft_gate_conf_threshold=args.soft_gate_conf_threshold,
+            soft_gate_issue_threshold=args.soft_gate_issue_threshold,
+            soft_gate_stratified_thresholds=args.soft_gate_stratified_thresholds,
+            soft_gate_data_mode=args.soft_gate_data_driven,
+            soft_gate_history_files=history_files,
         )
         _print_eval_summary(path)
         return
@@ -348,6 +444,11 @@ def main() -> None:
                 output_xlsx=out_path,
                 multi_architecture="orchestrator",
                 critic_strategy=strat,
+                soft_gate_conf_threshold=args.soft_gate_conf_threshold,
+                soft_gate_issue_threshold=args.soft_gate_issue_threshold,
+                soft_gate_stratified_thresholds=args.soft_gate_stratified_thresholds,
+                soft_gate_data_mode=args.soft_gate_data_driven,
+                soft_gate_history_files=history_files,
             )
             df = pd.read_excel(path, sheet_name="Results")
             ma_avg = float(df["ma_score"].mean())

@@ -138,6 +138,11 @@ def run_full_evaluation(
     output_xlsx: str = "results.xlsx",
     multi_architecture: str = "orchestrator",
     critic_strategy: str = "strict-rewrite",
+    soft_gate_conf_threshold: float = 0.58,
+    soft_gate_issue_threshold: int = 3,
+    soft_gate_stratified_thresholds: bool = False,
+    soft_gate_data_mode: str = "off",
+    soft_gate_history_files: list[str] | None = None,
 ) -> str:
     records: list[EvalRecord] = []
     log_event(
@@ -177,6 +182,12 @@ def run_full_evaluation(
             verbose=False,
             architecture=multi_architecture,
             critic_strategy=critic_strategy,
+            question_difficulty=q.get("complexity"),
+            soft_gate_conf_threshold=soft_gate_conf_threshold,
+            soft_gate_issue_threshold=soft_gate_issue_threshold,
+            soft_gate_stratified_thresholds=soft_gate_stratified_thresholds,
+            soft_gate_data_mode=soft_gate_data_mode,
+            soft_gate_history_files=soft_gate_history_files,
         )
         rec.ma_time = round(time.time() - t0, 3)
         rec.ma_score = run_evaluator(client, model, q["question"], q["expected"], ma.get("final_answer", "")).get("score", -1)

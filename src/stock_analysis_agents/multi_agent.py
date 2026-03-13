@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any
 
 from openai import OpenAI
@@ -104,6 +105,13 @@ VALID_CRITIC_STRATEGIES = {
     "auto",
 }
 
+DEFAULT_SOFT_GATE_THRESHOLDS = {
+    "global": {"conf": 0.58, "issues": 3},
+    "easy": {"conf": 0.55, "issues": 4},
+    "medium": {"conf": 0.58, "issues": 3},
+    "hard": {"conf": 0.62, "issues": 2},
+}
+
 
 def _parse_json(text: str, fallback: dict) -> dict:
     try:
@@ -166,6 +174,126 @@ def _infer_auto_critic_strategy(question: str) -> tuple[str, str]:
     if complexity_score >= 2 or domain_count == 2:
         return "soft-gated", "auto:soft-gated(medium-complexity)"
     return "strict-rewrite", "auto:strict-rewrite(low-complexity)"
+
+
+def _normalize_data_mode(mode: str | None) -> str:
+    raw = (mode or "off").strip().lower()
+    aliases = {
+        "none": "off",
+        "disabled": "off",
+        "global": "global",
+        "stratified": "stratified",
+    }
+    norm = aliases.get(raw, raw)
+    if norm not in {"off", "global", "stratified"}:
+        raise ValueError("soft_gate_data_mode must be one of: off, global, stratified.")
+    return norm
+
+
+def _normalize_difficulty(difficulty: str | None, question: str | None = None) -> str:
+    d = (difficulty or "").strip().lower()
+    if d in {"easy", "medium", "hard"}:
+        return d
+    q = (question or "").lower()
+    if "top 3" in q or "which" in q and (" and " in q or " but " in q):
+        return "hard"
+    if "compare" in q or "sentiment" in q or "6-month" in q:
+        return "medium"
+    return "easy"
+
+
+def _coerce_thresholds(raw: dict[str, Any] | None) -> dict[str, dict[str, float]]:
+    out = {
+        "global": dict(DEFAULT_SOFT_GATE_THRESHOLDS["global"]),
+        "easy": dict(DEFAULT_SOFT_GATE_THRESHOLDS["easy"]),
+        "medium": dict(DEFAULT_SOFT_GATE_THRESHOLDS["medium"]),
+        "hard": dict(DEFAULT_SOFT_GATE_THRESHOLDS["hard"]),
+    }
+    if not raw:
+        return out
+    for k in ("global", "easy", "medium", "hard"):
+        if k not in raw or not isinstance(raw[k], dict):
+            continue
+        if "conf" in raw[k]:
+            try:
+                out[k]["conf"] = float(raw[k]["conf"])
+            except Exception:
+                pass
+        if "issues" in raw[k]:
+            try:
+                out[k]["issues"] = int(raw[k]["issues"])
+            except Exception:
+                pass
+    for k in out:
+        out[k]["conf"] = max(0.0, min(1.0, float(out[k]["conf"])))
+        out[k]["issues"] = max(1, int(out[k]["issues"]))
+    return out
+
+
+def _compute_data_driven_thresholds_from_history(
+    history_files: list[str] | None,
+    mode: str,
+) -> dict[str, dict[str, float]]:
+    thresholds = _coerce_thresholds(None)
+    if mode == "off" or not history_files:
+        return thresholds
+
+    rows: list[dict[str, Any]] = []
+    for fp in history_files:
+        path = Path(fp)
+        if not path.exists():
+            continue
+        try:
+            import pandas as pd
+
+            df = pd.read_excel(path, sheet_name="Results")
+        except Exception:
+            continue
+
+        if "ma_confidence" not in df.columns or "ma_critic_issue_count" not in df.columns or "ma_score" not in df.columns:
+            continue
+        for _, r in df.iterrows():
+            try:
+                conf = float(r["ma_confidence"])
+            except Exception:
+                continue
+            try:
+                issues = int(r["ma_critic_issue_count"])
+            except Exception:
+                issues = 0
+            try:
+                score = int(r["ma_score"])
+            except Exception:
+                continue
+            diff = str(r.get("complexity", r.get("Difficulty", ""))).strip().lower()
+            if diff not in {"easy", "medium", "hard"}:
+                diff = "easy"
+            rows.append({"conf": conf, "issues": issues, "score": score, "difficulty": diff})
+
+    if not rows:
+        return thresholds
+
+    def derive(subset: list[dict[str, Any]], fallback: dict[str, float]) -> dict[str, float]:
+        bad = [x for x in subset if x["score"] <= 1]
+        if not bad:
+            return dict(fallback)
+        bad_conf = sorted(float(x["conf"]) for x in bad)
+        bad_issues = sorted(int(x["issues"]) for x in bad)
+        # 75th percentile of bad-confidence and median bad-issues.
+        idx_conf = min(len(bad_conf) - 1, int(round(0.75 * (len(bad_conf) - 1))))
+        idx_issue = min(len(bad_issues) - 1, int(round(0.50 * (len(bad_issues) - 1))))
+        conf_th = max(0.35, min(0.9, bad_conf[idx_conf]))
+        issue_th = max(1, min(12, bad_issues[idx_issue]))
+        return {"conf": float(conf_th), "issues": int(issue_th)}
+
+    global_thr = derive(rows, thresholds["global"])
+    thresholds["global"] = global_thr
+
+    if mode == "stratified":
+        for d in ("easy", "medium", "hard"):
+            subset = [x for x in rows if x["difficulty"] == d]
+            thresholds[d] = derive(subset, global_thr)
+    return thresholds
 
 
 def _orchestrate(client: OpenAI, model: str, question: str) -> dict:
@@ -403,6 +531,13 @@ def run_multi_agent_orchestrator(
     question: str,
     verbose: bool = False,
     critic_strategy: str = DEFAULT_CRITIC_STRATEGY,
+    question_difficulty: str | None = None,
+    soft_gate_conf_threshold: float = 0.58,
+    soft_gate_issue_threshold: int = 3,
+    soft_gate_stratified_thresholds: bool = False,
+    soft_gate_data_mode: str = "off",
+    soft_gate_history_files: list[str] | None = None,
+    soft_gate_threshold_overrides: dict[str, dict[str, float]] | None = None,
 ) -> dict:
     start = time.time()
     log_event(
@@ -411,12 +546,39 @@ def run_multi_agent_orchestrator(
         model=model,
         critic_strategy_requested=critic_strategy,
         question_preview=(question or "")[:180],
+        question_difficulty=question_difficulty,
+        soft_gate_data_mode=soft_gate_data_mode,
     )
     requested_strategy = _normalize_critic_strategy(critic_strategy)
     strategy = requested_strategy
     strategy_note = requested_strategy
     if requested_strategy == "auto":
         strategy, strategy_note = _infer_auto_critic_strategy(question)
+
+    difficulty = _normalize_difficulty(question_difficulty, question)
+    data_mode = _normalize_data_mode(soft_gate_data_mode)
+    base_thresholds = _coerce_thresholds(soft_gate_threshold_overrides)
+    base_thresholds["global"]["conf"] = max(0.0, min(1.0, float(soft_gate_conf_threshold)))
+    base_thresholds["global"]["issues"] = max(1, int(soft_gate_issue_threshold))
+    if data_mode != "off":
+        thresholds = _compute_data_driven_thresholds_from_history(soft_gate_history_files, data_mode)
+        # Keep manual global overrides as fallback floor/ceiling if explicitly provided.
+        if data_mode == "global":
+            thresholds["global"] = dict(thresholds["global"])
+        else:
+            for d in ("easy", "medium", "hard"):
+                thresholds[d] = dict(thresholds[d])
+    else:
+        thresholds = base_thresholds
+
+    if soft_gate_stratified_thresholds or data_mode == "stratified":
+        gate_conf_threshold = float(thresholds.get(difficulty, thresholds["global"])["conf"])
+        gate_issue_threshold = int(thresholds.get(difficulty, thresholds["global"])["issues"])
+        gate_mode = f"stratified:{difficulty}"
+    else:
+        gate_conf_threshold = float(thresholds["global"]["conf"])
+        gate_issue_threshold = int(thresholds["global"]["issues"])
+        gate_mode = "global"
 
     plan = _orchestrate(client, model, question)
     log_event("multi_agent.plan", architecture="orchestrator", agents=plan.get("agents", []))
@@ -456,7 +618,7 @@ def run_multi_agent_orchestrator(
         rewrite_applied = False
         draft_choice = "A"
     elif strategy == "soft-gated":
-        gate_triggered = conf_a < 0.58 or len(issues_a) >= 3
+        gate_triggered = conf_a < gate_conf_threshold or len(issues_a) >= gate_issue_threshold
         final_answer = rewrite_a if gate_triggered else draft_a
         final_conf = conf_a
         final_issues = issues_a
@@ -535,6 +697,11 @@ def run_multi_agent_orchestrator(
         "critic_score_b": critic_score_b,
         "critic_confidence": final_conf,
         "critic_issue_count": len(final_issues),
+        "question_difficulty": difficulty,
+        "soft_gate_mode": gate_mode,
+        "soft_gate_conf_threshold": gate_conf_threshold,
+        "soft_gate_issue_threshold": gate_issue_threshold,
+        "soft_gate_data_mode": data_mode,
     }
     log_event(
         "multi_agent.critic_decision",
@@ -548,6 +715,11 @@ def run_multi_agent_orchestrator(
         critic_score_b=critic_score_b,
         critic_confidence=final_conf,
         critic_issue_count=len(final_issues),
+        question_difficulty=difficulty,
+        soft_gate_mode=gate_mode,
+        soft_gate_conf_threshold=gate_conf_threshold,
+        soft_gate_issue_threshold=gate_issue_threshold,
+        soft_gate_data_mode=data_mode,
     )
     log_event(
         "multi_agent.end",
@@ -732,6 +904,13 @@ def run_multi_agent(
     verbose: bool = False,
     architecture: str = "orchestrator",
     critic_strategy: str = DEFAULT_CRITIC_STRATEGY,
+    question_difficulty: str | None = None,
+    soft_gate_conf_threshold: float = 0.58,
+    soft_gate_issue_threshold: int = 3,
+    soft_gate_stratified_thresholds: bool = False,
+    soft_gate_data_mode: str = "off",
+    soft_gate_history_files: list[str] | None = None,
+    soft_gate_threshold_overrides: dict[str, dict[str, float]] | None = None,
 ) -> dict:
     arch = (architecture or "orchestrator").strip().lower()
     if arch in {"orchestrator", "orchestrator-specialists-critic", "default"}:
@@ -742,6 +921,13 @@ def run_multi_agent(
             question,
             verbose=verbose,
             critic_strategy=critic_strategy,
+            question_difficulty=question_difficulty,
+            soft_gate_conf_threshold=soft_gate_conf_threshold,
+            soft_gate_issue_threshold=soft_gate_issue_threshold,
+            soft_gate_stratified_thresholds=soft_gate_stratified_thresholds,
+            soft_gate_data_mode=soft_gate_data_mode,
+            soft_gate_history_files=soft_gate_history_files,
+            soft_gate_threshold_overrides=soft_gate_threshold_overrides,
         )
     if arch in {"pipeline", "sequential", "sequential-pipeline"}:
         return run_multi_agent_pipeline(client, model, tool_functions, question, verbose=verbose)

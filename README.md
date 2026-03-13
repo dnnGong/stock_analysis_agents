@@ -194,6 +194,29 @@ stock-agents ask "What is Apple's P/E ratio?" --arch multi --multi-arch orchestr
 
 `ask` output now includes a **Critic Diagnostics** section (strategy, rewrite applied, gate, draft choice, critic confidence/issues).
 
+### Soft-gated threshold controls
+```bash
+# Manual global thresholds
+stock-agents ask "Which tech stocks dropped this month but grew this year?" \
+  --arch multi --multi-arch orchestrator --critic-strategy soft-gated \
+  --soft-gate-conf-threshold 0.60 --soft-gate-issue-threshold 3
+
+# Enable manual stratified thresholds (easy/medium/hard groups)
+stock-agents ask "Which tech stocks dropped this month but grew this year?" \
+  --arch multi --multi-arch orchestrator --critic-strategy soft-gated \
+  --soft-gate-stratified-thresholds
+
+# Data-driven global threshold (from historical .xlsx files)
+stock-agents ask "Which tech stocks dropped this month but grew this year?" \
+  --arch multi --multi-arch orchestrator --critic-strategy soft-gated \
+  --soft-gate-data-driven global --soft-gate-history-glob "./results_*.xlsx"
+
+# Data-driven stratified thresholds (easy/medium/hard each learned separately)
+stock-agents ask "Which tech stocks dropped this month but grew this year?" \
+  --arch multi --multi-arch orchestrator --critic-strategy soft-gated \
+  --soft-gate-data-driven stratified --soft-gate-history-glob "./results_*.xlsx"
+```
+
 ### Ask with single-agent
 ```bash
 stock-agents ask "Compare the 1-year returns of AAPL, MSFT, GOOGL" --arch single
@@ -216,6 +239,11 @@ stock-agents eval --model gpt-4o --multi-arch orchestrator --critic-strategy dua
 stock-agents eval --model gpt-4o --multi-arch orchestrator --critic-strategy no-rewrite --output results_sdk_4o_orch_norewrite.xlsx
 stock-agents eval --model gpt-4o --multi-arch orchestrator --critic-strategy minimal-rewrite --output results_sdk_4o_orch_minrewrite.xlsx
 stock-agents eval --model gpt-4o --multi-arch orchestrator --critic-strategy auto --output results_sdk_4o_orch_auto.xlsx
+
+# Run with data-driven stratified soft-gated thresholds
+stock-agents eval --model gpt-4o --multi-arch orchestrator --critic-strategy soft-gated \
+  --soft-gate-data-driven stratified --soft-gate-history-glob "./results_*.xlsx" \
+  --output results_sdk_4o_soft_stratified_learned.xlsx
 ```
 
 Each evaluation xlsx now includes:
@@ -227,6 +255,11 @@ Each evaluation xlsx now includes:
 ```bash
 stock-agents eval-strategies --model gpt-4o --output-prefix results_strategy_compare
 stock-agents eval-strategies --model gpt-4o --strategies strict-rewrite,no-rewrite,soft-gated,dual-draft,minimal-rewrite,auto
+stock-agents eval-strategies --model gpt-4o \
+  --strategies soft-gated \
+  --soft-gate-data-driven global \
+  --soft-gate-history-glob "./results_*.xlsx" \
+  --output-prefix results_strategy_compare_soft_global
 ```
 
 This command writes one xlsx per strategy plus a consolidated CSV summary:

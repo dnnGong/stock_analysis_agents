@@ -240,6 +240,10 @@ stock-agents eval --model gpt-4o --multi-arch orchestrator --critic-strategy no-
 stock-agents eval --model gpt-4o --multi-arch orchestrator --critic-strategy minimal-rewrite --output results_sdk_4o_orch_minrewrite.xlsx
 stock-agents eval --model gpt-4o --multi-arch orchestrator --critic-strategy auto --output results_sdk_4o_orch_auto.xlsx
 
+# Explicit run_config path
+stock-agents eval --model gpt-4o --output results_sdk_4o.xlsx \
+  --run-config-path ./artifacts/run_config_4o.json
+
 # Run with data-driven stratified soft-gated thresholds
 stock-agents eval --model gpt-4o --multi-arch orchestrator --critic-strategy soft-gated \
   --soft-gate-data-driven stratified --soft-gate-history-glob "./results_*.xlsx" \
@@ -251,6 +255,10 @@ Each evaluation xlsx now includes:
 - `Summary` (Q3-style accuracy by architecture and difficulty)
 - `Calibration` (confidence-vs-score calibration metrics)
 
+Each evaluation also writes `run_config.json`:
+- default path: `<output_stem>_run_config.json`
+- custom path: `--run-config-path /your/path/run_config.json`
+
 ### Compare all critic strategies in one command
 ```bash
 stock-agents eval-strategies --model gpt-4o --output-prefix results_strategy_compare
@@ -260,11 +268,16 @@ stock-agents eval-strategies --model gpt-4o \
   --soft-gate-data-driven global \
   --soft-gate-history-glob "./results_*.xlsx" \
   --output-prefix results_strategy_compare_soft_global
+
+# Optional run_config path template per strategy
+stock-agents eval-strategies --model gpt-4o \
+  --run-config-path "./configs/run_config_{strategy}.json"
 ```
 
 This command writes one xlsx per strategy plus a consolidated CSV summary:
 - `results_strategy_compare_<strategy>.xlsx`
 - `results_strategy_compare_summary.csv`
+- and one config per run: default `<output_stem>_run_config.json`
 
 ## Python SDK Usage
 ```python

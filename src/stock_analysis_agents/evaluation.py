@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import math
+import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import pandas as pd
 from openai import OpenAI
@@ -143,6 +146,7 @@ def run_full_evaluation(
     soft_gate_stratified_thresholds: bool = False,
     soft_gate_data_mode: str = "off",
     soft_gate_history_files: list[str] | None = None,
+    run_config_path: str | None = None,
 ) -> str:
     records: list[EvalRecord] = []
     log_event(
@@ -235,9 +239,33 @@ def run_full_evaluation(
         df.to_excel(writer, index=False, sheet_name="Results")
         summary.to_excel(writer, index=False, sheet_name="Summary")
         calibration.to_excel(writer, index=False, sheet_name="Calibration")
+
+    if run_config_path is None:
+        stem, _ = os.path.splitext(output_xlsx)
+        run_config_path = f"{stem}_run_config.json"
+    run_config_dir = os.path.dirname(os.path.abspath(run_config_path))
+    if run_config_dir:
+        os.makedirs(run_config_dir, exist_ok=True)
+    run_config = {
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "model": model,
+        "question_count": len(questions),
+        "question_ids": [q.get("id") for q in questions],
+        "output_xlsx": output_xlsx,
+        "multi_architecture": multi_architecture,
+        "critic_strategy": critic_strategy,
+        "soft_gate_conf_threshold": soft_gate_conf_threshold,
+        "soft_gate_issue_threshold": soft_gate_issue_threshold,
+        "soft_gate_stratified_thresholds": soft_gate_stratified_thresholds,
+        "soft_gate_data_mode": soft_gate_data_mode,
+        "soft_gate_history_files": list(soft_gate_history_files or []),
+    }
+    with open(run_config_path, "w", encoding="utf-8") as f:
+        json.dump(run_config, f, ensure_ascii=False, indent=2)
     log_event(
         "evaluation.end",
         output_xlsx=output_xlsx,
+        run_config_path=run_config_path,
         baseline_avg=float(df["bl_score"].mean()) if len(df) else float("nan"),
         single_avg=float(df["sa_score"].mean()) if len(df) else float("nan"),
         multi_avg=float(df["ma_score"].mean()) if len(df) else float("nan"),

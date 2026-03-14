@@ -210,6 +210,14 @@ def main() -> None:
         help="Output .xlsx file path (default: results_sdk.xlsx)",
     )
     ev.add_argument(
+        "--run-config-path",
+        default="",
+        help=(
+            "Path for run_config.json. "
+            "Default: <output_stem>_run_config.json"
+        ),
+    )
+    ev.add_argument(
         "--model",
         default=None,
         help="Override model name for this run",
@@ -276,6 +284,15 @@ def main() -> None:
         "--output-prefix",
         default="results_strategy_compare",
         help="Output file prefix (default: results_strategy_compare)",
+    )
+    evs.add_argument(
+        "--run-config-path",
+        default="",
+        help=(
+            "Optional run_config path for eval-strategies. "
+            "Use '{strategy}' placeholder, e.g. './cfg_{strategy}.json'. "
+            "If omitted, each strategy writes next to its xlsx as <stem>_run_config.json."
+        ),
     )
     evs.add_argument(
         "--model",
@@ -405,6 +422,7 @@ def main() -> None:
         return
 
     if args.cmd == "eval":
+        run_config_path = args.run_config_path or (os.path.splitext(args.output)[0] + "_run_config.json")
         path = run_full_evaluation(
             client=client,
             model=model,
@@ -418,8 +436,10 @@ def main() -> None:
             soft_gate_stratified_thresholds=args.soft_gate_stratified_thresholds,
             soft_gate_data_mode=args.soft_gate_data_driven,
             soft_gate_history_files=history_files,
+            run_config_path=run_config_path,
         )
         _print_eval_summary(path)
+        print(_line("Run Config", run_config_path))
         return
 
     if args.cmd == "eval-strategies":
@@ -436,6 +456,14 @@ def main() -> None:
         rows: list[dict[str, Any]] = []
         for strat in strategies:
             out_path = f"{args.output_prefix}_{strat.replace('-', '_')}.xlsx"
+            config_path = None
+            if args.run_config_path:
+                if "{strategy}" in args.run_config_path:
+                    config_path = args.run_config_path.format(strategy=strat.replace("-", "_"))
+                else:
+                    stem, ext = os.path.splitext(args.run_config_path)
+                    ext = ext or ".json"
+                    config_path = f"{stem}_{strat.replace('-', '_')}{ext}"
             path = run_full_evaluation(
                 client=client,
                 model=model,
@@ -449,6 +477,7 @@ def main() -> None:
                 soft_gate_stratified_thresholds=args.soft_gate_stratified_thresholds,
                 soft_gate_data_mode=args.soft_gate_data_driven,
                 soft_gate_history_files=history_files,
+                run_config_path=config_path,
             )
             df = pd.read_excel(path, sheet_name="Results")
             ma_avg = float(df["ma_score"].mean())

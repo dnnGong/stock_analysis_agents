@@ -115,6 +115,12 @@ cd stock_analysis_agents
 python -m pip install -e .
 ```
 
+Install the Streamlit web app extras if you want the browser UI:
+
+```bash
+python -m pip install -e ".[app]"
+```
+
 ## Environment Variables
 Export these in your shell before running:
 
@@ -167,6 +173,32 @@ stock-agents eval -h
 stock-agents eval-strategies -h
 stock-agents build-db -h
 ```
+
+## Web App Frontend
+Run the Streamlit app from the project root:
+
+```bash
+streamlit run src/stock_analysis_agents/app_streamlit.py
+```
+
+The app provides:
+- A chat workspace for stock-analysis questions.
+- Single-agent and multi-agent mode selection.
+- Orchestrator, sequential pipeline, and parallel specialist patterns.
+- Critic strategy controls for orchestrator mode.
+- Data provider, model, API key, and local `stocks.db` controls.
+- Per-answer diagnostics with tool usage, resolved follow-up questions, critic output, and agent summaries.
+
+You can configure credentials either in the sidebar or through environment variables:
+
+```bash
+export OPENAI_API_KEY="your_openai_key"
+export ALPHAVANTAGE_API_KEY="your_alpha_vantage_key"
+export STOCK_AGENTS_DATA_PROVIDER="hybrid"
+export STOCK_AGENTS_DB_PATH="/absolute/path/to/stocks.db"
+```
+
+For a lighter setup, choose `yahoo` as the data provider in the sidebar. Yahoo mode supports price and overview tools without an Alpha Vantage key, while market status, movers, and news sentiment require Alpha Vantage-backed modes.
 
 ### Ask one question (multi-agent default)
 ```bash
@@ -317,6 +349,7 @@ stock_analysis_agents/
 ├── src/
 │   └── stock_analysis_agents/
 │       ├── __init__.py
+│       ├── app_streamlit.py    # Streamlit web frontend
 │       ├── cli.py              # CLI entrypoint: stock-agents
 │       ├── config.py           # env-based settings
 │       ├── llm.py              # OpenAI client factory

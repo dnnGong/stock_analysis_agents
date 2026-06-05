@@ -22,6 +22,9 @@ dependencies = [
 dev = [
   "pytest>=8.0.0",
 ]
+app = [
+  "streamlit>=1.36.0",
+]
 
 [project.scripts]
 stock-agents = "stock_analysis_agents.cli:main"
